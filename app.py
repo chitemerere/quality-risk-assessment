@@ -882,7 +882,7 @@ def main():
             ]))
             
             # Load picklist options
-            options = get_dosage_form_route_options()
+            options = get_dosage_form_route_options()  # Assume this returns a list of tuples (id, dosage_form_route)
 
             st.session_state['updated_by'] = st.text_input('Updated By')
             st.session_state['date_last_updated'] = st.date_input('Date Last Updated')
@@ -895,11 +895,12 @@ def main():
             control_owners = st.text_input('Control Owner(s)', key='control_owners')
             residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), key='residual_risk_probability')
             residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), key='residual_risk_impact')
-            # Create a picklist in Streamlit
+
+            # Create a picklist in Streamlit for selecting Dosage Form and Route
             picklist = st.selectbox(
                 "Select Dosage Form and Route",
-                options=[(opt[0], opt[1]) for opt in options],
-                format_func=lambda x: x[1]
+                options=options,
+                format_func=lambda x: f"{x[1]}"  # Display the actual dosage form and route
             )
 
             # New field for Subsidiary
@@ -936,7 +937,8 @@ def main():
                     'residual_risk_impact': residual_risk_impact,
                     'residual_risk_rating': residual_risk_rating,
                     'Product_Type': st.session_state['Product_Type'],
-                    'dosage_form_route_id': picklist[0],  # Add the selected dosage_form_route_id to the new risk data
+                    'dosage_form_route_id': picklist[0],  # Store the selected dosage_form_route_id
+                    'dosage_form_route': picklist[1],  # Store the actual dosage_form_route
                     'Product_Name': product_name,
                     'Active_Ingredient': active_ingredient,
                     'Strength': strength,
@@ -954,6 +956,80 @@ def main():
 
                 except Exception as e:
                     st.error(f"Error inserting into risk_data: {e}")
+            
+#             # Load picklist options
+#             options = get_dosage_form_route_options()
+
+#             st.session_state['updated_by'] = st.text_input('Updated By')
+#             st.session_state['date_last_updated'] = st.date_input('Date Last Updated')
+#             risk_description = st.text_input('Risk Description', key='risk_description')
+#             cause_consequences = st.text_input('Cause & Consequences', key='cause_consequences')
+#             risk_owners = st.text_input('Risk Owner(s)', key='risk_owners')
+#             inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), key='inherent_risk_probability')
+#             inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), key='inherent_risk_impact')
+#             controls = st.text_input('Control(s)', key='controls')
+#             control_owners = st.text_input('Control Owner(s)', key='control_owners')
+#             residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), key='residual_risk_probability')
+#             residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), key='residual_risk_impact')
+#             # Create a picklist in Streamlit
+#             picklist = st.selectbox(
+#                 "Select Dosage Form and Route",
+#                 options=[(opt[0], opt[1]) for opt in options],
+#                 format_func=lambda x: x[1]
+#             )
+
+#             # New field for Subsidiary
+#             st.session_state['Product_Type'] = st.selectbox('Product_Type', sorted([
+#                 'Medical Device', 'Pharmaceutical', 'Other'
+#             ]))
+
+#             # New fields for the added columns
+#             product_name = st.text_input('Product Name', key='product_name')
+#             active_ingredient = st.text_input('Active Ingredient', key='active_ingredient')
+#             strength = st.text_input('Strength', key='strength')
+#             lot_number = st.text_input('Lot Number', key='lot_number')
+#             expiry_date = st.date_input('Expiry Date', key='expiry_date')
+
+#             engine = connect_to_db()
+
+#             if st.button('Enter Risk'):
+#                 inherent_risk_rating = calculate_risk_rating(inherent_risk_probability, inherent_risk_impact)
+#                 residual_risk_rating = calculate_risk_rating(residual_risk_probability, residual_risk_impact)
+
+#                 new_risk = {
+#                     'risk_type': st.session_state['risk_type'],
+#                     'updated_by': st.session_state['updated_by'],
+#                     'date_last_updated': st.session_state['date_last_updated'],
+#                     'risk_description': risk_description,
+#                     'cause_consequences': cause_consequences,
+#                     'risk_owners': risk_owners, 
+#                     'inherent_risk_probability': inherent_risk_probability,
+#                     'inherent_risk_impact': inherent_risk_impact,
+#                     'inherent_risk_rating': inherent_risk_rating,
+#                     'controls': controls,
+#                     'control_owners': control_owners,
+#                     'residual_risk_probability': residual_risk_probability,
+#                     'residual_risk_impact': residual_risk_impact,
+#                     'residual_risk_rating': residual_risk_rating,
+#                     'Product_Type': st.session_state['Product_Type'],
+#                     'dosage_form_route_id': picklist[0],  # Add the selected dosage_form_route_id to the new risk data
+#                     'Product_Name': product_name,
+#                     'Active_Ingredient': active_ingredient,
+#                     'Strength': strength,
+#                     'Lot_Number': lot_number,
+#                     'Expiry_Date': expiry_date
+#                 }
+
+#                 try:
+#                     insert_into_risk_data(new_risk)
+#                     st.success("New risk data successfully entered")
+
+#                     # Fetch and display the latest data after insertion
+#                     risk_data = fetch_all_from_risk_data(engine)  # Fetch fresh data
+#                     st.session_state['risk_data'] = risk_data  # Update session state with the latest data
+
+#                 except Exception as e:
+#                     st.error(f"Error inserting into risk_data: {e}")
          
                      
             st.subheader('Risk Filters')

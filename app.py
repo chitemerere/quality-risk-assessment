@@ -957,81 +957,7 @@ def main():
                 except Exception as e:
                     st.error(f"Error inserting into risk_data: {e}")
             
-#             # Load picklist options
-#             options = get_dosage_form_route_options()
-
-#             st.session_state['updated_by'] = st.text_input('Updated By')
-#             st.session_state['date_last_updated'] = st.date_input('Date Last Updated')
-#             risk_description = st.text_input('Risk Description', key='risk_description')
-#             cause_consequences = st.text_input('Cause & Consequences', key='cause_consequences')
-#             risk_owners = st.text_input('Risk Owner(s)', key='risk_owners')
-#             inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), key='inherent_risk_probability')
-#             inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), key='inherent_risk_impact')
-#             controls = st.text_input('Control(s)', key='controls')
-#             control_owners = st.text_input('Control Owner(s)', key='control_owners')
-#             residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), key='residual_risk_probability')
-#             residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), key='residual_risk_impact')
-#             # Create a picklist in Streamlit
-#             picklist = st.selectbox(
-#                 "Select Dosage Form and Route",
-#                 options=[(opt[0], opt[1]) for opt in options],
-#                 format_func=lambda x: x[1]
-#             )
-
-#             # New field for Subsidiary
-#             st.session_state['Product_Type'] = st.selectbox('Product_Type', sorted([
-#                 'Medical Device', 'Pharmaceutical', 'Other'
-#             ]))
-
-#             # New fields for the added columns
-#             product_name = st.text_input('Product Name', key='product_name')
-#             active_ingredient = st.text_input('Active Ingredient', key='active_ingredient')
-#             strength = st.text_input('Strength', key='strength')
-#             lot_number = st.text_input('Lot Number', key='lot_number')
-#             expiry_date = st.date_input('Expiry Date', key='expiry_date')
-
-#             engine = connect_to_db()
-
-#             if st.button('Enter Risk'):
-#                 inherent_risk_rating = calculate_risk_rating(inherent_risk_probability, inherent_risk_impact)
-#                 residual_risk_rating = calculate_risk_rating(residual_risk_probability, residual_risk_impact)
-
-#                 new_risk = {
-#                     'risk_type': st.session_state['risk_type'],
-#                     'updated_by': st.session_state['updated_by'],
-#                     'date_last_updated': st.session_state['date_last_updated'],
-#                     'risk_description': risk_description,
-#                     'cause_consequences': cause_consequences,
-#                     'risk_owners': risk_owners, 
-#                     'inherent_risk_probability': inherent_risk_probability,
-#                     'inherent_risk_impact': inherent_risk_impact,
-#                     'inherent_risk_rating': inherent_risk_rating,
-#                     'controls': controls,
-#                     'control_owners': control_owners,
-#                     'residual_risk_probability': residual_risk_probability,
-#                     'residual_risk_impact': residual_risk_impact,
-#                     'residual_risk_rating': residual_risk_rating,
-#                     'Product_Type': st.session_state['Product_Type'],
-#                     'dosage_form_route_id': picklist[0],  # Add the selected dosage_form_route_id to the new risk data
-#                     'Product_Name': product_name,
-#                     'Active_Ingredient': active_ingredient,
-#                     'Strength': strength,
-#                     'Lot_Number': lot_number,
-#                     'Expiry_Date': expiry_date
-#                 }
-
-#                 try:
-#                     insert_into_risk_data(new_risk)
-#                     st.success("New risk data successfully entered")
-
-#                     # Fetch and display the latest data after insertion
-#                     risk_data = fetch_all_from_risk_data(engine)  # Fetch fresh data
-#                     st.session_state['risk_data'] = risk_data  # Update session state with the latest data
-
-#                 except Exception as e:
-#                     st.error(f"Error inserting into risk_data: {e}")
-         
-                     
+                    
             st.subheader('Risk Filters')
         
             engine = connect_to_db()
@@ -1751,10 +1677,53 @@ def main():
             engine = connect_to_db()
             
             if not st.session_state['risk_data'].empty:
-                risk_to_delete = st.selectbox('Select a risk to delete', fetch_all_from_risk_data(engine)['risk_description'].tolist())
+                # Fetching all risks data
+                risk_data_df = fetch_all_from_risk_data(engine)
+                
+                # Selecting a risk by its description
+                risk_to_delete_description = st.selectbox('Select a risk to delete', risk_data_df['risk_description'].tolist())
+
+                # Filtering the DataFrame to find the selected risk
+                selected_risk = risk_data_df[risk_data_df['risk_description'] == risk_to_delete_description].iloc[0]
+                
+                if 'risk_type' in selected_risk:
+                    st.write(f"**Risk Type:** {selected_risk['risk_type']}")
+                else:
+                    st.write("Risk Type not available.")
+
+                if 'cause_consequences' in selected_risk:
+                    st.write(f"**Cause:** {selected_risk['cause_consequences']}")
+                else:
+                    st.write("Cause not available.")
+
+                if 'risk_owners' in selected_risk:
+                    st.write(f"**Risk Owner(s):** {selected_risk['risk_owners']}")
+                else:
+                    st.write("Risk Owner(s) not available.")
+
+                if 'Product_Name' in selected_risk:
+                    st.write(f"**Product Name:** {selected_risk['Product_Name']}")
+                else:
+                    st.write("Product Name not available.")
+
+                if 'Active_Ingredient' in selected_risk:
+                    st.write(f"**Active Ingredient:** {selected_risk['Active_Ingredient']}")
+                else:
+                    st.write("Active Ingredient not available.")
+
+                if 'Strength' in selected_risk:
+                    st.write(f"**Strength:** {selected_risk['Strength']}")
+                else:
+                    st.write("Strength not available.")
+
+                if 'Lot_Number' in selected_risk:
+                    st.write(f"**Lot Number:** {selected_risk['Lot_Number']}")
+                else:
+                    st.write("Lot Number not available.")
+                 
                 if st.button('Delete Risk'):
                     initial_count = len(st.session_state['risk_data'])
-                    delete_from_risk_data_by_risk_description(risk_to_delete)
+                    delete_from_risk_data_by_risk_description(risk_to_delete_description)
                     st.session_state['risk_data'] = fetch_all_from_risk_data(engine)
                     if len(st.session_state['risk_data']) < initial_count:
                         st.write("Risk deleted.")

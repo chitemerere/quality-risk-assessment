@@ -475,7 +475,7 @@ def get_risk_appetite(risk_type):
         'Product Performance Risk': ['Low'],
         'Adverse Event Risk': ['Low'],
         'User-Related Risk': ['Moderate'],
-        'Maufacturing and Supply Chain Risk': ['Low', 'Moderate'],
+        'Manufacturing and Supply Chain Risk': ['Low', 'Moderate'],
         'Environmental Risk': ['Low'],
         'Regulatory and Compliance Risk': ['Low'],
         'Patient-Related Risk': ['Low'],
@@ -531,6 +531,8 @@ def update_risk_data_by_risk_description(risk_description, updated_risk):
         Active_Ingredient = :Active_Ingredient,
         Strength = :Strength,
         Lot_Number = :Lot_Number,
+        Manufacturer = :Manufacturer,
+        Status = :Status,
         Expiry_Date = :Expiry_Date
     WHERE risk_description = :risk_description
     """)
@@ -564,8 +566,71 @@ def fetch_risk_by_description(risk_description):
         return dict(result._mapping)
     else:
         return None
-       
+    
+def fetch_dosage_form_route_distribution(filtered_data):
+    df_dosage = filtered_data['dosage_form_route'].value_counts().reset_index()
+    df_dosage.columns = ['dosage_form_route', 'count']
+    return df_dosage
 
+def make_autopct(counts):
+    def my_autopct(pct):
+        total = sum(counts)
+        val = int(round(pct * total / 100.0))
+        return f'{pct:.1f}%\n({val})'
+    return my_autopct
+    
+def fetch_residual_risk_rating_distribution():
+    engine = connect_to_db()
+    query = "SELECT residual_risk_rating, COUNT(*) as count FROM risk_data GROUP BY residual_risk_rating"
+    with engine.connect() as connection:
+        df = pd.read_sql(query, connection)
+    return df
+
+# Function to calculate cumulative counts and percentages
+def calculate_cumulative(df, group_by_col, count_col):
+    df_count = df.groupby(group_by_col)[count_col].count().reset_index(name='count')
+    df_count['cumulative_count'] = df_count['count'].cumsum()
+    df_count['percentage_count'] = (df_count['count'] / df_count['count'].sum()) * 100
+    df_count['cumulative_percentage_count'] = df_count['percentage_count'].cumsum()
+    return df_count
+
+# Function to apply filters
+def apply_filters(df, start_date, end_date, risk_owners, product_type):
+    if start_date and end_date:
+        df = df[(df['date_last_updated'] >= start_date) & (df['date_last_updated'] <= end_date)]
+    if risk_owners != 'All':
+        df = df[df['risk_owners'] == risk_owners]
+    if product_type != 'All':
+        df = df[df['Product_Type'] == product_type]
+    return df
+
+# Function to create and display reports
+def create_report(df, group_by_col, rating_col, report_title):
+    filtered_df = df[[group_by_col, rating_col]]
+    report_df = calculate_cumulative(filtered_df, group_by_col, rating_col)
+    
+    # Ensure cumulative counts and percentages are correct
+    total_count = report_df['cumulative_count'].iloc[-1]
+    total_percentage = report_df['cumulative_percentage_count'].iloc[-1]
+    assert total_count == filtered_df[group_by_col].count(), "Cumulative count does not match total"
+    assert round(total_percentage, 1) == 100.0, "Cumulative percentage count does not add up to 100%"
+
+    st.write(f"### {report_title}")
+    st.dataframe(report_df)
+    
+    # Download CSV
+    csv = report_df.to_csv(index=False)
+    download_filename = f"{report_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    st.download_button(f"Download {report_title} as CSV", csv, file_name=download_filename)
+    
+# Function to plot trends
+def plot_trend(data, x_col, y_col, title):
+    trend_data = data.groupby([x_col, y_col]).size().reset_index(name='count')
+    trend_pivot = trend_data.pivot(index=x_col, columns=y_col, values='count').fillna(0)
+    
+    st.write(f"### {title}")
+    st.line_chart(trend_pivot)
+  
 def main():
     st.image("logo.png", width=200)
     st.markdown('### Quality Risk Assessment Application')
@@ -707,7 +772,8 @@ def main():
 
         tab = st.sidebar.selectbox(
             'Choose a function',
-            ('Risk Matrix', 'Main Application', 'Risks Overview', 'Risks Owners & Control Owners', 'Adjusted Risk Matrices', 'Delete Risk', 'Update Risk')
+            ('Risk Matrix', 'Main Application', 'Risks Overview', 'Risks Owners & Control Owners', 
+             'Adjusted Risk Matrices', 'Performance Metrics', 'Reports','Delete Risk', 'Update Risk')
         )
 
         if 'risk_data' not in st.session_state:
@@ -737,6 +803,9 @@ def main():
             
         if 'Product_Type' not in st.session_state:
             st.session_state['Product_Type'] = ''
+            
+        if 'Status' not in st.session_state:
+            st.session_state['Status'] = ''
 
         if 'date_last_updated' not in st.session_state:
             st.session_state['date_last_updated'] = pd.to_datetime('today')
@@ -870,17 +939,17 @@ def main():
         
         elif tab == 'Main Application':
             if 'risk_data' not in st.session_state:
-                st.session_state['risk_data'] = fetch_all_from_risk_data() 
+                st.session_state['risk_data'] = fetch_all_from_risk_data(engine) 
                                  
             st.subheader('Enter Risk Details')
-          
+            
             st.session_state['risk_type'] = st.selectbox('Risk Type', sorted([
-                'Product Performance Risk', 'Adverse Event Riak', 'User-Related Risk', 
+                'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
                 'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
                 'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
                 'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
             ]))
-            
+
             # Load picklist options
             options = get_dosage_form_route_options()  # Assume this returns a list of tuples (id, dosage_form_route)
 
@@ -895,6 +964,9 @@ def main():
             control_owners = st.text_input('Control Owner(s)', key='control_owners')
             residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), key='residual_risk_probability')
             residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), key='residual_risk_impact')
+
+            # New field for Status
+            status = st.selectbox('Status', ['Open', 'Closed'], key='status')
 
             # Create a picklist in Streamlit for selecting Dosage Form and Route
             picklist = st.selectbox(
@@ -914,6 +986,7 @@ def main():
             strength = st.text_input('Strength', key='strength')
             lot_number = st.text_input('Lot Number', key='lot_number')
             expiry_date = st.date_input('Expiry Date', key='expiry_date')
+            manufacturer = st.text_input('Manufacturer', key='manufacturer')
 
             engine = connect_to_db()
 
@@ -938,28 +1011,36 @@ def main():
                     'residual_risk_rating': residual_risk_rating,
                     'Product_Type': st.session_state['Product_Type'],
                     'dosage_form_route_id': picklist[0],  # Store the selected dosage_form_route_id
-                    'dosage_form_route': picklist[1],  # Store the actual dosage_form_route
+                    'dosage_form_route': picklist[1],  # Store the actual dosage form and route
                     'Product_Name': product_name,
                     'Active_Ingredient': active_ingredient,
                     'Strength': strength,
                     'Lot_Number': lot_number,
-                    'Expiry_Date': expiry_date
+                    'Manufacturer': manufacturer,
+                    'Expiry_Date': expiry_date,
+                    'Status': status  # Add the selected status to the new_risk dictionary
                 }
 
-                try:
-                    insert_into_risk_data(new_risk)
-                    st.success("New risk data successfully entered")
+                # Check if a record with the same risk_description already exists
+                existing_risk = fetch_risk_by_description(risk_description)
 
-                    # Fetch and display the latest data after insertion
-                    risk_data = fetch_all_from_risk_data(engine)  # Fetch fresh data
-                    st.session_state['risk_data'] = risk_data  # Update session state with the latest data
+                if existing_risk:
+                    st.warning(f"A risk with the description '{risk_description}' already exists. Please use a different description or update the existing risk.")
+                else:
+                    try:
+                        insert_into_risk_data(new_risk)
+                        st.success("New risk data successfully entered")
 
-                except Exception as e:
-                    st.error(f"Error inserting into risk_data: {e}")
-            
-                    
+                        # Fetch and display the latest data after insertion
+                        risk_data = fetch_all_from_risk_data(engine)  # Fetch fresh data
+                        st.session_state['risk_data'] = risk_data  # Update session state with the latest data
+
+                    except Exception as e:
+                        st.error(f"Error inserting into risk_data: {e}")
+                         
             st.subheader('Risk Filters')
-        
+            
+            # Connect to the database
             engine = connect_to_db()
 
             # Load or fetch data
@@ -967,7 +1048,7 @@ def main():
 
             # Initialize filtered_data as an empty DataFrame
             filtered_data = pd.DataFrame()
-            
+
             # Define colors for each risk rating
             colors = {
                 'Low': 'background-color: green',
@@ -1010,7 +1091,7 @@ def main():
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
 
-            # Define subsidiaries and add 'All' option, then sort alphabetically
+            # Define product types and add 'All' option, then sort alphabetically
             product_type = [
                 'All',
                 'Medical Device',
@@ -1019,18 +1100,26 @@ def main():
             ]
             product_type.sort()
 
-            # Add a selectbox for subsidiary filtering
+            # Add a selectbox for product type filtering
             selected_product_type = st.selectbox('Select Product Type', product_type)
 
-            # Apply subsidiary filter if not 'All'
+            # Apply product type filter if not 'All'
             if selected_product_type != 'All':
                 filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
+
+            # Add a filter for risk owners
+            risk_owners = ['All'] + sorted(risk_data['risk_owners'].dropna().unique().tolist())
+            selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners)
+
+            # Apply risk owners filter if not 'All'
+            if selected_risk_owner != 'All':
+                filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner]
 
             st.subheader('Risk Data')
 
             # Display the filtered data or a message if it's empty
             if filtered_data.empty:
-                st.info("No data available for the selected date range and subsidiary.")
+                st.info("No data available for the selected filters.")
             else:
                 # Apply the style to both columns
                 styled_risk_data = filtered_data.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating'])
@@ -1117,7 +1206,7 @@ def main():
             st.subheader('Risk Filters')
             
             engine = connect_to_db()
-            
+
             # Load data from session state
             risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
 
@@ -1154,7 +1243,7 @@ def main():
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
 
-            # Define subsidiaries and add 'All' option, then sort alphabetically
+            # Define product types and add 'All' option, then sort alphabetically
             product_type = [
                 'All',
                 'Medical Device',
@@ -1163,18 +1252,26 @@ def main():
             ]
             product_type.sort()
 
-            # Add a selectbox for subsidiary filtering
+            # Add a selectbox for product type filtering
             selected_product_type = st.selectbox('Select Product Type', product_type)
 
-            # Apply subsidiary filter if not 'All'
+            # Apply product type filter if not 'All'
             if selected_product_type != 'All':
                 filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
+
+            # Add a filter for risk owners
+            risk_owners = ['All'] + sorted(risk_data['risk_owners'].dropna().unique().tolist())
+            selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners)
+
+            # Apply risk owners filter if not 'All'
+            if selected_risk_owner != 'All':
+                filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner]
 
             st.subheader('Risk Data')
 
             # Display the filtered data or a message if it's empty
             if filtered_data.empty:
-                st.info("No data available for the selected date range and subsidiary.")
+                st.info("No data available for the selected filters.")
             else:
                 # Before Risk Appetite Analysis
                 st.subheader('Before Risk Appetite')
@@ -1201,12 +1298,12 @@ def main():
 
                 if 'residual_risk_rating' in filtered_data.columns:
                     residual_risk_rating_counts = filtered_data['residual_risk_rating'].value_counts()
-                    
+
                     residual_critical_count = residual_risk_rating_counts.get('Extreme', 0)
                     residual_severe_count = residual_risk_rating_counts.get('High', 0)
                     residual_moderate_count = residual_risk_rating_counts.get('Moderate', 0)
                     residual_sustainable_count = residual_risk_rating_counts.get('Low', 0)
-                                                                                              
+
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Extreme Residual Risks", residual_critical_count)
@@ -1242,7 +1339,7 @@ def main():
 
                 # After Risk Appetite Analysis
                 st.subheader('After Risk Appetite')
-                              
+
                 # Check for required columns before applying further filtering
                 if 'inherent_risk_rating' in filtered_data.columns and 'residual_risk_rating' in filtered_data.columns and 'risk_type' in filtered_data.columns:
                     filtered_data['risk_appetite'] = filtered_data['risk_type'].apply(get_risk_appetite)
@@ -1671,6 +1768,229 @@ def main():
                     plot_risk_matrix_with_axes_labels(inherent_risk_count_matrix, inherent_risk_matrix, "Inherent Risk Matrix with Counts")
                     plot_risk_matrix_with_axes_labels(residual_risk_count_matrix, residual_risk_matrix, "Residual Risk Matrix with Counts")
            
+        elif tab == 'Performance Metrics':
+            st.title('Performance Metrics')
+            st.subheader('Risk Filters')
+            
+            # Main code starts here
+            engine = connect_to_db()
+
+            # Load data from session state
+            risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
+
+            # Initialize filtered_data as an empty DataFrame
+            filtered_data = pd.DataFrame()
+
+            # Check if the DataFrame is not empty and contains the 'date_last_updated' column
+            if not risk_data.empty and 'date_last_updated' in risk_data.columns:
+                # Ensure 'date_last_updated' is in datetime format, coerce errors to NaT
+                risk_data['date_last_updated'] = pd.to_datetime(risk_data['date_last_updated'], errors='coerce')
+
+                # Date filter section: ensure min_date and max_date are valid
+                min_date = risk_data['date_last_updated'].min()
+                max_date = risk_data['date_last_updated'].max()
+
+                # Handle cases where min_date or max_date might be NaT
+                if pd.isnull(min_date):
+                    min_date = datetime.today().date()
+                else:
+                    min_date = min_date.date()
+
+                if pd.isnull(max_date):
+                    max_date = datetime.today().date()
+                else:
+                    max_date = max_date.date()
+
+                # Use the dates in the Streamlit date input
+                from_date = st.date_input('From', value=min_date, min_value=min_date, max_value=max_date)
+                to_date = st.date_input('To', value=max_date, min_value=min_date, max_value=max_date)
+
+                # Apply date filter to the data
+                filtered_data = risk_data[(risk_data['date_last_updated'] >= pd.Timestamp(from_date)) &
+                                          (risk_data['date_last_updated'] <= pd.Timestamp(to_date))]
+            else:
+                st.warning("The data is empty or missing the 'date_last_updated' column.")
+
+            # Define product types and add 'All' option, then sort alphabetically
+            product_type = [
+                'All',
+                'Medical Device',
+                'Pharmaceutical',
+                'Other'
+            ]
+            product_type.sort()
+
+            # Add a selectbox for product type filtering
+            selected_product_type = st.selectbox('Select Product Type', product_type)
+
+            # Apply product type filter if not 'All'
+            if selected_product_type != 'All':
+                filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
+
+            # Check if 'residual_risk_rating' column exists in the filtered data
+            if 'residual_risk_rating' in filtered_data.columns:
+                # Define residual risk ratings and add 'All' option
+                residual_risk_ratings = filtered_data['residual_risk_rating'].dropna().unique().tolist()
+                residual_risk_ratings.insert(0, 'All')
+
+                # Add a selectbox for residual risk rating filtering
+                selected_risk_rating = st.selectbox('Select Residual Risk Rating', residual_risk_ratings)
+
+                # Apply residual risk rating filter if not 'All'
+                if selected_risk_rating != 'All':
+                    filtered_data = filtered_data[filtered_data['residual_risk_rating'] == selected_risk_rating]
+            else:
+                st.warning("The data is missing the 'residual_risk_rating' column.")
+
+            # Check if 'risk_owners' column exists in the filtered data
+            if 'risk_owners' in filtered_data.columns:
+                # Define risk owners and add 'All' option
+                risk_owners_list = filtered_data['risk_owners'].dropna().unique().tolist()
+                risk_owners_list.insert(0, 'All')
+
+                # Add a selectbox for risk owners filtering
+                selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners_list)
+
+                # Apply risk owners filter if not 'All'
+                if selected_risk_owner != 'All':
+                    filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner]
+            else:
+                st.warning("The data is missing the 'risk_owners' column.")
+
+            # Display filtered data for debugging purposes
+            # st.write("Filtered Data:", filtered_data)
+
+            # Check if filtered_data is not empty and proceed with the rest of your code
+            if not filtered_data.empty:
+                # Pie chart for Dosage Form Route Distribution using the filtered data
+                st.subheader('Dosage Form Route Distribution')
+                df_dosage = fetch_dosage_form_route_distribution(filtered_data)
+                if df_dosage.empty:
+                    st.warning("No data available to display.")
+                else:
+                    # Create labels that include both the dosage form route and the count
+                    labels_dosage = [f"{row['dosage_form_route']} ({row['count']})" for _, row in df_dosage.iterrows()]
+
+                    fig, ax = plt.subplots()
+                    ax.pie(df_dosage['count'], labels=labels_dosage, autopct=make_autopct(df_dosage['count']), startangle=90)
+                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                    st.pyplot(fig)
+
+                # Pie chart for Residual Risk Rating Distribution using the filtered data
+                st.subheader("Residual Risk Rating Distribution")
+
+                # Group the filtered data by 'residual_risk_rating' and count the occurrences
+                rating_distribution = filtered_data['residual_risk_rating'].value_counts().reset_index()
+                rating_distribution.columns = ['residual_risk_rating', 'count']
+
+                if rating_distribution.empty:
+                    st.warning("No data available to display.")
+                else:
+                    # Create labels that include both the residual risk rating and the count
+                    labels_risk = [f"{row['residual_risk_rating']} ({row['count']})" for _, row in rating_distribution.iterrows()]
+
+                    fig, ax = plt.subplots()
+                    ax.pie(rating_distribution['count'], labels=labels_risk, autopct=make_autopct(rating_distribution['count']), startangle=90)
+                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                    st.pyplot(fig)
+
+                # Pie chart for Risk 'Status' Distribution using the filtered data
+                st.subheader("Risk Status Distribution")
+
+                # Group the filtered data by 'Status' and count the occurrences
+                status_distribution = filtered_data['Status'].value_counts().reset_index()
+                status_distribution.columns = ['Status', 'count']
+
+                if status_distribution.empty:
+                    st.warning("No data available to display.")
+                else:
+                    # Create labels that include both the risk status and the count
+                    labels_status = [f"{row['Status']} ({row['count']})" for _, row in status_distribution.iterrows()]
+
+                    fig, ax = plt.subplots()
+                    ax.pie(status_distribution['count'], labels=labels_status, autopct=make_autopct(status_distribution['count']), startangle=90)
+                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                    st.pyplot(fig)
+
+                # Pie chart for 'Time Open' Distribution using the filtered data
+                st.subheader("Time Open Distribution(Days)")
+
+                # Group the filtered data by 'Time Open' and count the occurrences
+                time_open_distribution = filtered_data['Time Open'].value_counts().reset_index()
+                time_open_distribution.columns = ['Time Open', 'count']
+
+                if time_open_distribution.empty:
+                    st.warning("No data available to display.")
+                else:
+                    # Create labels that include both the 'Time Open' value and the count
+                    labels_time_open = [f"{row['Time Open']} ({row['count']})" for _, row in time_open_distribution.iterrows()]
+
+                    fig, ax = plt.subplots()
+                    ax.pie(time_open_distribution['count'], labels=labels_time_open, autopct=make_autopct(time_open_distribution['count']), startangle=90)
+                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                    st.pyplot(fig)
+
+            else:
+                st.warning("No data available after filtering.")
+
+        elif tab == 'Reports':
+            st.title('Reports')
+            
+            # Main code starts here
+            engine = connect_to_db()
+
+            # Load data from session state
+            risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
+            
+            # Tab for reports
+            if st.checkbox("Show Reports"):
+                st.header("Filters")
+
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    start_date = st.date_input("Start Date", value=None)
+                with col2:
+                    end_date = st.date_input("End Date", value=None)
+                with col3:
+                    risk_owners = st.selectbox("Risk Owners", options=['All'] + risk_data['risk_owners'].unique().tolist())
+                product_type = st.selectbox("Product Type", options=['All'] + risk_data['Product_Type'].unique().tolist())
+
+                # Apply filters to the risk_data
+                filtered_data = apply_filters(risk_data, start_date, end_date, risk_owners, product_type)
+
+                # Generate and display reports
+                create_report(filtered_data, 'risk_type', 'residual_risk_rating', 'Risk Type by Residual Risk Rating')
+                create_report(filtered_data, 'dosage_form_route', 'residual_risk_rating', 'Dosage Form Route by Residual Risk Rating')
+                create_report(filtered_data, 'Active_Ingredient', 'residual_risk_rating', 'Active Ingredient by Residual Risk Rating')
+                create_report(filtered_data, 'Manufacturer', 'residual_risk_rating', 'Manufacturer by Residual Risk Rating')
+                
+                st.title("Risk Data Trend Analysis")
+
+                # Load the risk_data from session state or fetch from the database
+                risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
+
+                # Convert date column to datetime format for proper analysis
+                risk_data['date_last_updated'] = pd.to_datetime(risk_data['date_last_updated'])
+
+                # Filters
+                start_date = st.date_input("Start Date", value=risk_data['date_last_updated'].min().date())
+                end_date = st.date_input("End Date", value=risk_data['date_last_updated'].max().date())
+                filtered_data = risk_data[(risk_data['date_last_updated'] >= pd.to_datetime(start_date)) &
+                                          (risk_data['date_last_updated'] <= pd.to_datetime(end_date))]
+
+                # Trend Analysis 1: Risk Occurrence Over Time by Risk Type
+                plot_trend(filtered_data, 'date_last_updated', 'risk_type', 'Trend of Risk Occurrence Over Time by Risk Type')
+
+                # Trend Analysis 2: Inherent Risk Rating Trends Over Time
+                plot_trend(filtered_data, 'date_last_updated', 'inherent_risk_rating', 'Trend of Inherent Risk Rating Over Time')
+
+                # Trend Analysis 3: Residual Risk Rating Trends Over Time
+                plot_trend(filtered_data, 'date_last_updated', 'residual_risk_rating', 'Trend of Residual Risk Rating Over Time')
+
+                # Trend Analysis 4: Product Type Risk Trends Over Time
+                plot_trend(filtered_data, 'date_last_updated', 'Product_Type', 'Trend of Risks by Product Type Over Time')   
+        
         elif tab == 'Delete Risk':
             st.subheader('Delete Risk from Risk Data')
             
@@ -1720,6 +2040,16 @@ def main():
                     st.write(f"**Lot Number:** {selected_risk['Lot_Number']}")
                 else:
                     st.write("Lot Number not available.")
+                    
+                if 'Manufacturer' in selected_risk:
+                    st.write(f"**Manufacturer:** {selected_risk['Manufacturer']}")
+                else:
+                    st.write("Manufacturer not available.")
+                    
+                if 'Status' in selected_rsk:
+                    st.write(f"**Status:** {selected_risk['Status']}")
+                else:
+                    st.write("Status not avaliable.")
                  
                 if st.button('Delete Risk'):
                     initial_count = len(st.session_state['risk_data'])
@@ -1729,12 +2059,13 @@ def main():
                         st.write("Risk deleted.")
             else:
                 st.write("No risks to delete.")
-                              
+         
+                             
         elif tab == 'Update Risk':
             st.subheader('Update Risk in Risk Data')
-            
+                             
             engine = connect_to_db()
-            
+
             # Fetch the current 'risk_type' from the selected row
             if not st.session_state['risk_data'].empty:
                 # Fetch the risk descriptions for selection
@@ -1749,116 +2080,114 @@ def main():
 
                     # Allow user to change the 'risk_type' with the current value pre-selected
                     st.session_state['risk_type'] = st.selectbox('Risk Type', sorted([
-                                'Product Performance Risk', 'Adverse Event Riak', 'User-Related Risk', 
-                                'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
-                                'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
-                                'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
-                               
-                            ]), index=sorted([
-                                'Product Performance Risk', 'Adverse Event Riak', 'User-Related Risk', 
-                                'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
-                                'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
-                                'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
-                                 
-                            ]).index(selected_risk_row['risk_type']))
-                    
-            # Fetch the existing picklist options for dosage form and route
-            options = get_dosage_form_route_options()
+                        'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
+                        'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
+                        'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
+                        'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
+                    ]), index=sorted([
+                        'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
+                        'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
+                        'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
+                        'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
+                    ]).index(selected_risk_row['risk_type']))
 
-            # Retrieve the existing dosage_form_route_id from the selected risk
-            current_dosage_form_route_id = selected_risk_row['dosage_form_route_id']
-            current_dosage_form_route = next((opt[1] for opt in options if opt[0] == current_dosage_form_route_id), None)
+                # Fetch the existing picklist options for dosage form and route
+                options = get_dosage_form_route_options()
 
-            # Display fields for updating the risk
-            updated_risk_description = st.text_input('Risk Description', value=selected_risk_row['risk_description'])
-            updated_cause_consequences = st.text_input('Cause & Consequences', value=selected_risk_row['cause_consequences'])
-            updated_risk_owners = st.text_input('Risk Owner(s)', value=selected_risk_row['risk_owners'])
-            updated_inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['inherent_risk_probability']))
-            updated_inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['inherent_risk_impact']))
-            updated_controls = st.text_input('Control(s)', value=selected_risk_row['controls'])
-            updated_control_owners = st.text_input('Control Owner(s)', value=selected_risk_row['control_owners'])
-            updated_residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['residual_risk_probability']))
-            updated_residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['residual_risk_impact']))
-            updated_by = st.text_input('Updated By', value=selected_risk_row['updated_by'])
-            updated_date_last_updated = st.date_input('Date Last Updated', value=selected_risk_row['date_last_updated'])
+                # Retrieve the existing dosage_form_route_id from the selected risk
+                current_dosage_form_route_id = selected_risk_row['dosage_form_route_id']
+                current_dosage_form_route = next((opt[1] for opt in options if opt[0] == current_dosage_form_route_id), None)
 
-            # New field for updating Product Type
-            product_type_list = sorted(['Medical Device', 'Pharmaceutical', 'Other'])
+                # Display fields for updating the risk
+                updated_risk_description = st.text_input('Risk Description', value=selected_risk_row['risk_description'])
+                updated_cause_consequences = st.text_input('Cause & Consequences', value=selected_risk_row['cause_consequences'])
+                updated_risk_owners = st.text_input('Risk Owner(s)', value=selected_risk_row['risk_owners'])
+                updated_inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['inherent_risk_probability']))
+                updated_inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['inherent_risk_impact']))
+                updated_controls = st.text_input('Control(s)', value=selected_risk_row['controls'])
+                updated_control_owners = st.text_input('Control Owner(s)', value=selected_risk_row['control_owners'])
+                updated_residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['residual_risk_probability']))
+                updated_residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['residual_risk_impact']))
+                updated_by = st.text_input('Updated By', value=selected_risk_row['updated_by'])
+                updated_date_last_updated = st.date_input('Date Last Updated', value=selected_risk_row['date_last_updated'])
 
-            if selected_risk_row['Product_Type'] in product_type_list:
-                product_type_index = product_type_list.index(selected_risk_row['Product_Type'])
-            else:
-                product_type_index = 0  # Fallback to the first option or handle as needed
+                # New field for updating Product Type
+                product_type_list = sorted(['Medical Device', 'Pharmaceutical', 'Other'])
 
-            updated_product_type = st.selectbox('Product Type', product_type_list, index=product_type_index)
-
-            # New fields for updating Product_Name, Active_Ingredient, Strength, Lot_Number, and Expiry_Date
-            updated_product_name = st.text_input('Product Name', value=selected_risk_row['Product_Name'])
-            updated_active_ingredient = st.text_input('Active Ingredient', value=selected_risk_row['Active_Ingredient'])
-            updated_strength = st.text_input('Strength', value=selected_risk_row['Strength'])
-            updated_lot_number = st.text_input('Lot Number', value=selected_risk_row['Lot_Number'])
-            updated_expiry_date = st.date_input('Expiry Date', value=selected_risk_row['Expiry_Date'])
-
-            # New field for updating Dosage Form and Route using the picklist
-            if current_dosage_form_route_id in [opt[0] for opt in options]:
-                dosage_form_route_index = [opt[0] for opt in options].index(current_dosage_form_route_id)
-            else:
-                dosage_form_route_index = 0  # Fallback to the first option or handle as needed
-
-            updated_dosage_form_route = st.selectbox(
-                'Dosage Form and Route',
-                options=[(opt[0], opt[1]) for opt in options],
-                index=dosage_form_route_index,
-                format_func=lambda x: x[1]
-            )
-
-            if st.button('Update Risk'):
-                # Fetch the current risk data from the database based on risk_to_update identifier
-                existing_risk = fetch_risk_by_description(risk_to_update)
-
-                if existing_risk is not None:
-                    updated_risk = {
-                        'risk_type': st.session_state['risk_type'],
-                        'updated_by': updated_by,
-                        'date_last_updated': updated_date_last_updated.strftime('%Y-%m-%d'),
-                        'risk_description': updated_risk_description,
-                        'cause_consequences': updated_cause_consequences,
-                        'risk_owners': updated_risk_owners,
-                        'inherent_risk_probability': updated_inherent_risk_probability,
-                        'inherent_risk_impact': updated_inherent_risk_impact,
-                        'inherent_risk_rating': calculate_risk_rating(updated_inherent_risk_probability, updated_inherent_risk_impact),
-                        'controls': updated_controls,
-                        'control_owners': updated_control_owners,
-                        'residual_risk_probability': updated_residual_risk_probability,
-                        'residual_risk_impact': updated_residual_risk_impact,
-                        'residual_risk_rating': calculate_risk_rating(updated_residual_risk_probability, updated_residual_risk_impact),
-                        'Product_Type': updated_product_type,  # Include the updated product type in the risk update
-                        'dosage_form_route_id': updated_dosage_form_route[0],  # Include the updated dosage form and route ID
-                        'Product_Name': updated_product_name,  # Include the updated product name
-                        'Active_Ingredient': updated_active_ingredient,  # Include the updated active ingredient
-                        'Strength': updated_strength,  # Include the updated strength
-                        'Lot_Number': updated_lot_number,  # Include the updated lot number
-                        'Expiry_Date': updated_expiry_date.strftime('%Y-%m-%d')  # Include the updated expiry date
-                    }
-
-                    # Attempt to update the risk
-                    update_success = update_risk_data_by_risk_description(risk_to_update, updated_risk)
-                    st.session_state['risk_data'] = fetch_all_from_risk_data(engine)
-
-                    if update_success:
-                        st.success("Risk updated successfully.")
-                    else:
-                        st.error("Failed to update the risk.")
+                if selected_risk_row['Product_Type'] in product_type_list:
+                    product_type_index = product_type_list.index(selected_risk_row['Product_Type'])
                 else:
-                    st.warning("No matching risk found to update.")
+                    product_type_index = 0  # Fallback to the first option or handle as needed
+
+                updated_product_type = st.selectbox('Product Type', product_type_list, index=product_type_index)
+
+                # New fields for updating Product_Name, Active_Ingredient, Strength, Lot_Number, and Expiry_Date
+                updated_product_name = st.text_input('Product Name', value=selected_risk_row['Product_Name'])
+                updated_active_ingredient = st.text_input('Active Ingredient', value=selected_risk_row['Active_Ingredient'])
+                updated_strength = st.text_input('Strength', value=selected_risk_row['Strength'])
+                updated_lot_number = st.text_input('Lot Number', value=selected_risk_row['Lot_Number'])
+                updated_expiry_date = st.date_input('Expiry Date', value=selected_risk_row['Expiry_Date'])
+                updated_manufacturer = st.text_input('Manufacturer', value=selected_risk_row['Manufacturer'])
+
+                # New field for updating Dosage Form and Route using the picklist
+                if current_dosage_form_route_id in [opt[0] for opt in options]:
+                    dosage_form_route_index = [opt[0] for opt in options].index(current_dosage_form_route_id)
+                else:
+                    dosage_form_route_index = 0  # Fallback to the first option or handle as needed
+
+                updated_dosage_form_route = st.selectbox(
+                    'Dosage Form and Route',
+                    options=[(opt[0], opt[1]) for opt in options],
+                    index=dosage_form_route_index,
+                    format_func=lambda x: x[1]
+                )
+
+                # New field for updating Status
+                updated_status = st.selectbox('Status', ['Open', 'Closed'], index=['Open', 'Closed'].index(selected_risk_row['Status']))
+
+                if st.button('Update Risk'):
+                    # Fetch the current risk data from the database based on risk_to_update identifier
+                    existing_risk = fetch_risk_by_description(risk_to_update)
+
+                    if existing_risk is not None:
+                        updated_risk = {
+                            'risk_type': st.session_state['risk_type'],
+                            'updated_by': updated_by,
+                            'date_last_updated': updated_date_last_updated.strftime('%Y-%m-%d'),
+                            'risk_description': updated_risk_description,
+                            'cause_consequences': updated_cause_consequences,
+                            'risk_owners': updated_risk_owners,
+                            'inherent_risk_probability': updated_inherent_risk_probability,
+                            'inherent_risk_impact': updated_inherent_risk_impact,
+                            'inherent_risk_rating': calculate_risk_rating(updated_inherent_risk_probability, updated_inherent_risk_impact),
+                            'controls': updated_controls,
+                            'control_owners': updated_control_owners,
+                            'residual_risk_probability': updated_residual_risk_probability,
+                            'residual_risk_impact': updated_residual_risk_impact,
+                            'residual_risk_rating': calculate_risk_rating(updated_residual_risk_probability, updated_residual_risk_impact),
+                            'Product_Type': updated_product_type,  # Include the updated product type in the risk update
+                            'dosage_form_route_id': updated_dosage_form_route[0],  # Include the updated dosage form and route ID
+                            'Product_Name': updated_product_name,  # Include the updated product name
+                            'Active_Ingredient': updated_active_ingredient,  # Include the updated active ingredient
+                            'Strength': updated_strength,  # Include the updated strength
+                            'Lot_Number': updated_lot_number,  # Include the updated lot number
+                            'Expiry_Date': updated_expiry_date.strftime('%Y-%m-%d'),  # Include the updated expiry date
+                            'Manufacturer': updated_manufacturer,  # Include the updated manufacturer
+                            'Status': updated_status  # Include the updated status
+                        }
+
+                        # Attempt to update the risk
+                        update_success = update_risk_data_by_risk_description(risk_to_update, updated_risk)
+                        st.session_state['risk_data'] = fetch_all_from_risk_data(engine)
+
+                        if update_success:
+                            st.success("Risk updated successfully.")
+                        else:
+                            st.error("Failed to update the risk.")
+                    else:
+                        st.warning("No matching risk found to update.")
 
 if __name__ == '__main__':
     main()
         
-
-
-# In[ ]:
-
-
-
 

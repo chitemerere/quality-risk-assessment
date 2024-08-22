@@ -2046,7 +2046,7 @@ def main():
                 else:
                     st.write("Manufacturer not available.")
                     
-                if 'Status' in selected_rsk:
+                if 'Status' in selected_risk:
                     st.write(f"**Status:** {selected_risk['Status']}")
                 else:
                     st.write("Status not avaliable.")

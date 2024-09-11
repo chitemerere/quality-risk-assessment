@@ -20,21 +20,20 @@ from sqlalchemy import create_engine, text
 import logging
 import io
 import time
-# from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 # Configure logging
 logging.basicConfig(filename='application.log', level=logging.INFO)
 
 def connect_to_db():
     try:
-        username = st.secrets["username"]
-        password = st.secrets["password"]
-        host = st.secrets["host"]
-        database = st.secrets["database"]
-        ssl_ca = 'DigiCertGlobalRootCA.crt.pem'
+        # Retrieve secrets from environment variables
+        user = os.getenv('user')
+        password = os.getenv('password')
+        host = os.getenv('host')
+        database = os.getenv('database')
+        ssl_ca = os.getenv('ssl_ca')  # Ensure this is accessible in your environment
 
-        connection_string = f'mysql+pymysql://{username}:{password}@{host}/{database}?ssl_ca={ssl_ca}'
+        connection_string = f'mysql+pymysql://{user}:{password}@{host}/{database}?ssl_ca={ssl_ca}'
         engine = create_engine(connection_string)
         with engine.connect() as connection:
             result = connection.execute(text("SELECT 1"))
@@ -114,6 +113,14 @@ def insert_into_risk_data(data):
         with engine.connect() as connection:
             transaction = connection.begin()
             try:
+                # Ensure the @current_user_id session variable is set
+                if 'user_id' in st.session_state:
+                    user_id = st.session_state['user_id']
+                    connection.execute(text("SET @current_user_id = :user_id"), {"user_id": user_id})
+                else:
+                    st.error("User ID not found in session state. Cannot proceed with insertion.")
+                    return  # Early return if user_id is not set
+                
                 # Construct placeholders and columns from the data dictionary
                 placeholders = ', '.join([f":{key}" for key in data.keys()])
                 columns = ', '.join([f"`{key}`" for key in data.keys()])
@@ -128,11 +135,15 @@ def insert_into_risk_data(data):
                 transaction.commit()
                 logging.info(f"Inserted data: {data}")
             except Exception as e:
+                # Rollback the transaction in case of error
                 transaction.rollback()
                 st.write(f"Error during insertion to risk_data: {e}")
                 logging.error(f"Error during insertion: {e}")
-        engine.dispose()
-        
+            finally:
+                # Ensure the connection is disposed in all cases
+                engine.dispose()
+   
+      
 # Function to fetch the latest data from the database
 def fetch_latest_data(engine):
     try:
@@ -152,17 +163,27 @@ def fetch_all_from_risk_data(engine):
     except Exception as e:
         st.error(f"An error occurred while fetching data: {e}")
         return pd.DataFrame()
-
+    
 def delete_from_risk_data_by_risk_description(risk_description):
-    if 'user_role' in st.session_state and st.session_state.user_role == 'admin':
+    if 'user_role' in st.session_state and st.session_state.user_role in ['admin', 'superadmin']:
         engine = connect_to_db()
         if engine:
             with engine.connect() as connection:
                 transaction = connection.begin()
                 try:
+                    # Ensure the @current_user_id session variable is set
+                    if 'user_id' in st.session_state:
+                        user_id = st.session_state['user_id']
+                        connection.execute(text("SET @current_user_id = :user_id"), {"user_id": user_id})
+                    else:
+                        st.error("User ID not found in session state. Cannot proceed with deletion.")
+                        return
+
+                    # Prepare and execute the delete statement
                     query = text("DELETE FROM risk_data WHERE TRIM(risk_description) = :risk_description")
                     result = connection.execute(query, {"risk_description": risk_description})
                     transaction.commit()
+
                     if result.rowcount > 0:
                         st.success(f"Risk '{risk_description}' deleted.")
                         logging.info(f"Deleted risk description: {risk_description}, Rows affected: {result.rowcount}")
@@ -175,33 +196,77 @@ def delete_from_risk_data_by_risk_description(risk_description):
             engine.dispose()
     else:
         st.error("You do not have permission to delete risks.")
-
-def update_risk_data_by_risk_description(risk_description, data):
-    if 'user_role' in st.session_state and st.session_state.user_role == 'admin':
+        
+def update_risk_data_by_risk_description(risk_description, updated_risk):
+    # Check if the user has the required role to update the risk data
+    if 'user_role' in st.session_state and st.session_state.user_role in ['admin', 'superadmin']:
         engine = connect_to_db()
-        if engine:
-            with engine.connect() as connection:
-                transaction = connection.begin()
-                try:
-                    set_clause = ", ".join([f"{key} = :{key}" for key in data.keys()])
-                    query = text(f"UPDATE risk_data SET {set_clause} WHERE risk_description = :risk_description")
-                    data['risk_description'] = risk_description
-                    result = connection.execute(query, data)
-                    transaction.commit()
-                    if result.rowcount > 0:
-                        st.success("Risk updated successfully.")
-                        logging.info(f"Updated risk data for {risk_description}: {data}")
-                    else:
-                        st.warning(f"No risk found with description '{risk_description}'.")
-                except Exception as e:
-                    transaction.rollback()
-                    st.error(f"Error updating risk: {e}")
-                    logging.error(f"Error updating risk {risk_description}: {e}")
-            engine.dispose()
+        if not engine:
+            st.sidebar.error("Database connection failed.")
+            return
+
+        with engine.connect() as connection:
+            # Set the @current_user_id session variable
+            user_id = st.session_state.user_id
+            connection.execute(text("SET @current_user_id = :user_id"), {"user_id": user_id})
+
+            # Prepare and execute the update statement
+            update_query = text("""
+            UPDATE risk_data
+            SET
+                risk_type = :risk_type,
+                updated_by = :updated_by,
+                date_last_updated = :date_last_updated,
+                risk_description = :risk_description,
+                cause_consequences = :cause_consequences,
+                risk_owners = :risk_owners,
+                inherent_risk_probability = :inherent_risk_probability,
+                inherent_risk_impact = :inherent_risk_impact,
+                inherent_risk_rating = :inherent_risk_rating,
+                controls = :controls,
+                Adequacy = :Adequacy,
+                control_owners = :control_owners,
+                residual_risk_probability = :residual_risk_probability,
+                residual_risk_impact = :residual_risk_impact,
+                residual_risk_rating = :residual_risk_rating,
+                Direction = :Direction,
+                Unit = :Unit,
+                Status = :Status,
+                opportunity_type = :opportunity_type
+            WHERE
+                risk_description = :risk_description_filter
+            """)
+
+            # Execute the update query with the updated risk data
+            connection.execute(update_query, {
+                "risk_type": updated_risk['risk_type'],
+                "updated_by": updated_risk['updated_by'],
+                "date_last_updated": updated_risk['date_last_updated'],
+                "risk_description": updated_risk['risk_description'],
+                "cause_consequences": updated_risk['cause_consequences'],
+                "risk_owners": updated_risk['risk_owners'],
+                "inherent_risk_probability": updated_risk['inherent_risk_probability'],
+                "inherent_risk_impact": updated_risk['inherent_risk_impact'],
+                "inherent_risk_rating": updated_risk['inherent_risk_rating'],
+                "controls": updated_risk['controls'],
+                "Adequacy": updated_risk['Adequacy'],  # Ensure the key matches what is used in the dictionary
+                "control_owners": updated_risk['control_owners'],
+                "residual_risk_probability": updated_risk['residual_risk_probability'],
+                "residual_risk_impact": updated_risk['residual_risk_impact'],
+                "residual_risk_rating": updated_risk['residual_risk_rating'],
+                "Direction": updated_risk['Direction'],  # Ensure the key matches what is used in the dictionary
+                "Unit": updated_risk['Unit'],
+                "Status": updated_risk['Status'],
+                "opportunity_type": updated_risk['opportunity_type'],
+                "risk_description_filter": risk_description
+            })
+
+            # Notify the user that the risk has been updated successfully
+            st.write("Risk updated successfully.")
     else:
+        # If the user doesn't have the right permissions
         st.error("You do not have permission to update risks.")
-
-
+      
 def get_risk_id_by_description(risk_description):
     engine = connect_to_db()
     if engine:
@@ -311,7 +376,7 @@ def delete_from_risk_register_by_risk_description(risk_description):
     else:
         st.error("You do not have permission to delete risks.")
         
-def register(username, password):
+def register(user, password):
     engine = connect_to_db()
     if engine is None:
         logging.error("Failed to connect to the database.")
@@ -319,21 +384,21 @@ def register(username, password):
     
     try:
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        logging.debug(f"Hashed password for {username}: {hashed_password}")
+        logging.debug(f"Hashed password for {user}: {hashed_password}")
     except Exception as e:
-        logging.error(f"Password hashing failed for {username}: {e}")
+        logging.error(f"Password hashing failed for {user}: {e}")
         st.sidebar.warning(f"Password hashing error: {e}")
         return False
 
     try:
         with engine.connect() as connection:
-            query = text("INSERT INTO credentials (username, password) VALUES (:username, :password)")
-            result = connection.execute(query, {"username": username, "password": hashed_password.decode('utf-8')})
+            query = text("INSERT INTO credentials (user, password) VALUES (:user, :password)")
+            result = connection.execute(query, {"user": user, "password": hashed_password.decode('utf-8')})
             connection.commit()  # Ensure the transaction is committed
-            logging.info(f"Registered new user {username}, Rows affected: {result.rowcount}")
+            logging.info(f"Registered new user {user}, Rows affected: {result.rowcount}")
         return True
     except Exception as err:
-        logging.error(f"Registration error for user {username}: {err}")
+        logging.error(f"Registration error for user {user}: {err}")
         st.sidebar.warning(f"Error: {err}")
         return False
     
@@ -341,8 +406,8 @@ def register(username, password):
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-if 'username' not in st.session_state:
-    st.session_state.username = ""
+if 'user' not in st.session_state:
+    st.session_state.user = ""
 
 if 'user_role' not in st.session_state:
     st.session_state.user_role = ""
@@ -350,84 +415,87 @@ if 'user_role' not in st.session_state:
 # Initialize session state variables
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-
-if 'username' not in st.session_state:
-    st.session_state.username = ""
+    
+if 'user' not in st.session_state:
+    st.session_state.user = ""
 
 if 'user_role' not in st.session_state:
     st.session_state.user_role = ""
     
-def login(username, password):
-    logging.info(f"Attempting login for username: {username}")
+def login(user, password):
+    logging.info(f"Attempting login for username: {user}")
     engine = connect_to_db()
     if engine:
         try:
             with engine.connect() as connection:
-                query = text("SELECT password, expiry_date, role FROM credentials WHERE username = :username")
-                result = connection.execute(query, {"username": username})
+                # Adjusted query to include 'id' field
+                query = text("SELECT id, password, expiry_date, role FROM credentials WHERE user = :user")
+                result = connection.execute(query, {"user": user})
                 row = result.fetchone()
 
                 if row:
-                    stored_password, expiry_date, role = row
-                    logging.info(f"Fetched credentials for {username}")
+                    # Unpack the row to include 'id'
+                    user_id, stored_password, expiry_date, role = row
+                    logging.info(f"Fetched credentials for {user}")
 
                     if stored_password:
                         if bcrypt.checkpw(password.encode('utf-8'), stored_password.encode('utf-8')):
-                            logging.info(f"Password matched for {username}")
+                            logging.info(f"Password matched for {user}")
 
                             if expiry_date:
                                 try:
                                     expiry_date = datetime.strptime(str(expiry_date), '%Y-%m-%d')
                                     if expiry_date < datetime.now():
                                         st.sidebar.error("Your account has expired. Please contact the administrator.")
-                                        logging.info(f"Account expired for {username}")
+                                        logging.info(f"Account expired for {user}")
                                         return False
                                 except ValueError:
                                     st.sidebar.error("Invalid expiry date format. Please contact the administrator.")
-                                    logging.error(f"Invalid expiry date format for {username}: {expiry_date}")
+                                    logging.error(f"Invalid expiry date format for {user}: {expiry_date}")
                                     return False
 
                             if not role:
                                 st.sidebar.error("No role found for the user. Please contact the administrator.")
-                                logging.error(f"No role found for {username}")
+                                logging.error(f"No role found for {user}")
                                 return False
 
                             # If login is successful
                             st.session_state.logged_in = True
-                            st.session_state.username = username
+                            st.session_state.user = user
                             st.session_state.user_role = role
-                            logging.info(f"User {username} logged in successfully with role {role}.")
+                            st.session_state.user_id = user_id  # Store the user_id in session state
+                            logging.info(f"User {user} logged in successfully with role {role} and ID {user_id}.")
                             return True
                         else:
-                            logging.info(f"Invalid credentials for {username}")
+                            logging.info(f"Invalid credentials for {user}")
                             return False
                     else:
-                        logging.error(f"Stored password is missing for {username}")
+                        logging.error(f"Stored password is missing for {user}")
                         return False
                 else:
-                    logging.info(f"Username not found: {username}")
+                    logging.info(f"Username not found: {user}")
                     return False
         except Exception as e:
             logging.error(f"Login error: {e}")
         finally:
             engine.dispose()
     return False
-
+    
 def logout():
     """Logout the user and clear session state."""
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.session_state.logged_in = False
     
-def change_password(username, current_password, new_password):
-    logging.info(f"Initiating password change for user: {username}")
+def change_password(user, current_password, new_password):
+    logging.info(f"Initiating password change for user: {user}")
     engine = connect_to_db()
     if engine:
         try:
             with engine.begin() as connection:  # Use a transaction
                 # Verify the current password
-                query = text("SELECT password FROM credentials WHERE username = :username")
-                result = connection.execute(query, {"username": username})
+                query = text("SELECT password FROM credentials WHERE user = :user")
+                result = connection.execute(query, {"user": user})
                 row = result.fetchone()
                 
                 if row:
@@ -443,8 +511,8 @@ def change_password(username, current_password, new_password):
                         logging.info(f"New hashed password: {new_hashed_password}")
 
                         # Update with the new password
-                        update_query = text("UPDATE credentials SET password = :new_password WHERE username = :username")
-                        result = connection.execute(update_query, {"new_password": new_hashed_password, "username": username})
+                        update_query = text("UPDATE credentials SET password = :new_password WHERE user = :user")
+                        result = connection.execute(update_query, {"new_password": new_hashed_password, "user": user})
                         if result.rowcount == 1:
                             logging.info("Password updated in the database.")
                             return True
@@ -457,7 +525,7 @@ def change_password(username, current_password, new_password):
                         st.sidebar.error("The current password you entered is incorrect.")
                         return False
                 else:
-                    logging.warning(f"User {username} not found in the database.")
+                    logging.warning(f"User {user} not found in the database.")
                     st.sidebar.error("User not found.")
                     return False
         except Exception as e:
@@ -472,80 +540,39 @@ def change_password(username, current_password, new_password):
 # Define the risk appetite based on risk type
 def get_risk_appetite(risk_type):
     risk_appetite_map = {
-        'Product Performance Risk': ['Low'],
-        'Adverse Event Risk': ['Low'],
-        'User-Related Risk': ['Moderate'],
-        'Manufacturing and Supply Chain Risk': ['Low', 'Moderate'],
-        'Environmental Risk': ['Low'],
-        'Regulatory and Compliance Risk': ['Low'],
-        'Patient-Related Risk': ['Low'],
-        'Clinical and Operational Risk': ['Moderate'],
-        'Economic and Financial Risk': ['Moderate', 'High'],
-        'Public Perception and Social Risk': ['Low', 'Moderate'],
-        'Cybersecurity Risk': ['Low'],
-        'End-of-Life Risk': ['Moderate']
+        'Strategic Risk': ['Moderate', 'High', 'Critical'],
+        'Operational Risk': ['Low', 'Moderate', 'High'],
+        'Compliance Risk': ['Low', 'Moderate', 'High'],
+        'Reputational Risk': ['Low', 'Moderate', 'High'],
+        'Financial Risk': ['Low', 'Moderate', 'High'],
+        'Regulatory Risk': ['Moderate', 'High', 'Critical'],
+        'Enviromental Risk': ['Low', 'Moderate'],
+        'Human Resource Risk': ['Moderate', 'High'],
+        'Supply Chain Risk': ['Low', 'Moderate', 'High'],
+        'Ethical Risk': ['Low', 'Moderate'],
+        'Technlogical Risk': ['Moderate', 'High', 'Critical'],
+        'Public Health Risk': ['Low', 'Moderate', 'High']
     }
     return risk_appetite_map.get(risk_type, [])
 
-# Assuming `connect_to_db` returns an SQLAlchemy engine
-engine = connect_to_db()
+# Define unit and add 'All' option, then sort alphabetically
+units = [
+    'All',
+    'Licensing and Enforcement',
+    'Evaluations and Registration',
+    'Pharmacovigilance and Clinical Trials',
+    'Chemistry Laboratory',
+    'Microbiology Laboratory',
+    'Medical Devices Laboratory',
+    'Quality Unit',
+    'Legal Unit',
+    'Human Resources',
+    'Information and Communication Technology',
+    'Finance and Administration'                            
+]
+units.sort()
 
-# Function to get picklist options from the database
-def get_dosage_form_route_options():
-    # Create a session from the engine
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
-    # Execute the query using session with the text wrapper
-    sql_query = text("SELECT id, CONCAT(dosage_form, ' - ', route) as display_value FROM dosage_form_route")
-    result = session.execute(sql_query)
-    options = result.fetchall()
-
-    session.close()
-    
-    return options
-
-def update_risk_data_by_risk_description(risk_description, updated_risk):
-    engine = connect_to_db()
-    connection = engine.connect()
-
-    query = text("""
-    UPDATE risk_data 
-    SET risk_type = :risk_type,
-        updated_by = :updated_by,
-        date_last_updated = :date_last_updated,
-        risk_description = :risk_description,
-        cause_consequences = :cause_consequences,
-        risk_owners = :risk_owners,
-        inherent_risk_probability = :inherent_risk_probability,
-        inherent_risk_impact = :inherent_risk_impact,
-        inherent_risk_rating = :inherent_risk_rating,
-        controls = :controls,
-        control_owners = :control_owners,
-        residual_risk_probability = :residual_risk_probability,
-        residual_risk_impact = :residual_risk_impact,
-        residual_risk_rating = :residual_risk_rating,
-        Product_Type = :Product_Type,
-        dosage_form_route_id = :dosage_form_route_id,
-        Product_Name = :Product_Name,
-        Active_Ingredient = :Active_Ingredient,
-        Strength = :Strength,
-        Lot_Number = :Lot_Number,
-        Manufacturer = :Manufacturer,
-        Status = :Status,
-        Expiry_Date = :Expiry_Date
-    WHERE risk_description = :risk_description
-    """)
-
-    try:
-        result = connection.execute(query, updated_risk)
-        connection.commit()
-        connection.close()
-        return result.rowcount > 0  # Returns True if any row was updated, otherwise False
-    except Exception as e:
-        connection.rollback()
-        connection.close()
-        return False
+# Use unit in any part of the application
 
 # Function to get risk by description
 def fetch_risk_by_description(risk_description):
@@ -567,11 +594,6 @@ def fetch_risk_by_description(risk_description):
     else:
         return None
     
-def fetch_dosage_form_route_distribution(filtered_data):
-    df_dosage = filtered_data['dosage_form_route'].value_counts().reset_index()
-    df_dosage.columns = ['dosage_form_route', 'count']
-    return df_dosage
-
 def make_autopct(counts):
     def my_autopct(pct):
         total = sum(counts)
@@ -586,54 +608,111 @@ def fetch_residual_risk_rating_distribution():
         df = pd.read_sql(query, connection)
     return df
 
-# Function to calculate cumulative counts and percentages
-def calculate_cumulative(df, group_by_col, count_col):
-    df_count = df.groupby(group_by_col)[count_col].count().reset_index(name='count')
-    df_count['cumulative_count'] = df_count['count'].cumsum()
-    df_count['percentage_count'] = (df_count['count'] / df_count['count'].sum()) * 100
-    df_count['cumulative_percentage_count'] = df_count['percentage_count'].cumsum()
-    return df_count
+# Function to filter and generate trend analysis
+def generate_trend_analysis(risk_data):
+    # Convert date_last_updated to datetime
+    risk_data['date_last_updated'] = pd.to_datetime(risk_data['date_last_updated'])
+    
+    # Filters
+    risk_types = st.multiselect('Select Risk Type(s)', risk_data['risk_type'].unique(), default=risk_data['risk_type'].unique())
+    risk_owners = st.multiselect('Select Risk Owner(s)', risk_data['risk_owners'].unique(), default=risk_data['risk_owners'].unique())
+    
+    # Date filters with "From" and "To"
+    date_from = st.date_input("From Date", value=risk_data['date_last_updated'].min())
+    date_to = st.date_input("To Date", value=risk_data['date_last_updated'].max())
+    
+    # Ensure that 'date_from' is before 'date_to'
+    if date_from > date_to:
+        st.error("'From Date' must be earlier than 'To Date'. Please correct the dates.")
+        return
 
-# Function to apply filters
-def apply_filters(df, start_date, end_date, risk_owners, product_type):
-    if start_date and end_date:
-        df = df[(df['date_last_updated'] >= start_date) & (df['date_last_updated'] <= end_date)]
-    if risk_owners != 'All':
-        df = df[df['risk_owners'] == risk_owners]
-    if product_type != 'All':
-        df = df[df['Product_Type'] == product_type]
-    return df
+    # Filter data
+    filtered_data = risk_data[
+        (risk_data['risk_type'].isin(risk_types)) &
+        (risk_data['risk_owners'].isin(risk_owners)) &
+        (risk_data['date_last_updated'] >= pd.to_datetime(date_from)) &
+        (risk_data['date_last_updated'] <= pd.to_datetime(date_to))
+    ]
+    
+    if filtered_data.empty:
+        st.write("No data available for the selected filters.")
+    else:
+        # Trend analysis by risk type
+        trend_data = filtered_data.groupby(['date_last_updated', 'risk_type']).size().unstack(fill_value=0)
+        
+        st.write("Trend Analysis by Risk Type")
+        st.line_chart(trend_data)
+        
+        # Show filtered data
+        st.write("Filtered Data", filtered_data)
+        
+        # Allow download of the filtered data
+        csv = filtered_data.to_csv(index=False)
+        st.download_button(label="Download Filtered Data as CSV", data=csv, file_name="filtered_risk_data.csv", mime="text/csv")
+        
+# Function to calculate KPIs Critical
+def calculate_kpis(df):
+    # 1. Risk Reduction KPI
+    initial_critical_risks = df[df['inherent_risk_rating'] == 'Critical'].shape[0]
+    reduced_critical_risks = df[(df['inherent_risk_rating'] == 'Critical') & (df['residual_risk_rating'] != 'Critical')].shape[0]
+    risk_reduction_kpi = (reduced_critical_risks / initial_critical_risks) * 100 if initial_critical_risks > 0 else 0
 
-# Function to create and display reports
-def create_report(df, group_by_col, rating_col, report_title):
-    filtered_df = df[[group_by_col, rating_col]]
-    report_df = calculate_cumulative(filtered_df, group_by_col, rating_col)
-    
-    # Ensure cumulative counts and percentages are correct
-    total_count = report_df['cumulative_count'].iloc[-1]
-    total_percentage = report_df['cumulative_percentage_count'].iloc[-1]
-    assert total_count == filtered_df[group_by_col].count(), "Cumulative count does not match total"
-    assert round(total_percentage, 1) == 100.0, "Cumulative percentage count does not add up to 100%"
+    # 2. Action Completion KPI (Assuming 'Status' indicates completion)
+    total_actions = df.shape[0]
+    completed_actions = df[df['Status'] == 'Closed'].shape[0]
+    action_completion_kpi = (completed_actions / total_actions) * 100 if total_actions > 0 else 0
 
-    st.write(f"### {report_title}")
-    st.dataframe(report_df)
-    
-    # Download CSV
-    csv = report_df.to_csv(index=False)
-    download_filename = f"{report_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    st.download_button(f"Download {report_title} as CSV", csv, file_name=download_filename)
-    
-# Function to plot trends
-def plot_trend(data, x_col, y_col, title):
-    trend_data = data.groupby([x_col, y_col]).size().reset_index(name='count')
-    trend_pivot = trend_data.pivot(index=x_col, columns=y_col, values='count').fillna(0)
-    
-    st.write(f"### {title}")
-    st.line_chart(trend_pivot)
-  
+    # 3. Cost Performance KPI (If cost data were available, this would compare actual vs. budgeted costs)
+
+    # 4. Residual Risk KPI (Percentage of risks that are still rated 'Critical')
+    residual_critical_risks = df[df['residual_risk_rating'] == 'Critical'].shape[0]
+    residual_risk_kpi = (residual_critical_risks / total_actions) * 100 if total_actions > 0 else 0
+
+    return {
+        "Risk Reduction KPI (%)": risk_reduction_kpi,
+        "Action Completion KPI (%)": action_completion_kpi,
+        "Residual Risk KPI (%)": residual_risk_kpi
+    }
+
+# Function to calculate KPIs High
+def calculate_kpis_high(df):
+    # 1. Risk Reduction KPI
+    initial_high_risks = df[df['inherent_risk_rating'] == 'High'].shape[0]
+    reduced_high_risks = df[(df['inherent_risk_rating'] == 'High') & (df['residual_risk_rating'] != 'High')].shape[0]
+    risk_reduction_kpi = (reduced_high_risks / initial_high_risks) * 100 if initial_high_risks > 0 else 0
+
+    # 2. Action Completion KPI (Assuming 'Status' indicates completion)
+    total_actions = df.shape[0]
+    completed_actions = df[df['Status'] == 'Closed'].shape[0]
+    action_completion_kpi = (completed_actions / total_actions) * 100 if total_actions > 0 else 0
+
+    # 3. Cost Performance KPI (If cost data were available, this would compare actual vs. budgeted costs)
+
+    # 4. Residual Risk KPI (Percentage of risks that are still rated 'Critical')
+    residual_high_risks = df[df['residual_risk_rating'] == 'High'].shape[0]
+    residual_risk_kpi = (residual_high_risks / total_actions) * 100 if total_actions > 0 else 0
+
+    return {
+        "Risk Reduction KPI (%)": risk_reduction_kpi,
+        "Action Completion KPI (%)": action_completion_kpi,
+        "Residual Risk KPI (%)": residual_risk_kpi
+    }
+
+# Function to generate progress reports
+def generate_progress_reports(df):
+    # Generate report summary
+    report_summary = df.groupby(['Status']).size().reset_index(name='Count')
+    return report_summary
+
+# Function to create a risk dashboard
+def create_risk_dashboard(df):
+    # Create a dashboard with a summary of key metrics
+    risk_type_summary = df.groupby(['risk_type', 'residual_risk_rating']).size().reset_index(name='Count')
+    return risk_type_summary        
+
 def main():
-    st.image("logo.png", width=200)
-    st.markdown('### Quality Risk Assessment Application')
+    st.image("logo.png", width=400)
+    st.markdown('### Enterprise Risk Assessment Application')
      
     if not st.session_state.logged_in:
         st.sidebar.header("Login")
@@ -641,12 +720,12 @@ def main():
         password = st.sidebar.text_input("Password", type="password", key="login_password")
         if st.sidebar.button("Login", key="login_button"):
             if login(username, password):
-                st.sidebar.success(f"Logged in as: {st.session_state.username}")
+                st.sidebar.success(f"Logged in as: {st.session_state.user}")
                 st.sidebar.info(f"Role: {st.session_state.user_role}")
             else:
                 st.sidebar.error("Login failed. Please check your credentials.")
     else:
-        st.sidebar.header(f"Welcome, {st.session_state.username}")
+        st.sidebar.header(f"Welcome, {st.session_state.user}")
         st.sidebar.info(f"Role: {st.session_state.user_role}")
         if st.sidebar.button("Logout", key="logout_button"):
             logout()
@@ -659,7 +738,7 @@ def main():
         confirm_new_password = st.sidebar.text_input("Confirm New Password", type="password", key="confirm_new_password")
         if st.sidebar.button("Change Password"):
             if new_password == confirm_new_password:
-                if change_password(st.session_state.username, current_password, new_password):
+                if change_password(st.session_state.user, current_password, new_password):
                     st.sidebar.success("Password changed successfully.")
                 else:
                     st.sidebar.error("Current password is incorrect.")
@@ -668,11 +747,11 @@ def main():
 
     # Additional application logic goes here
     if st.session_state.logged_in:
-        st.write(f"Welcome {st.session_state.username}! You are logged in as {st.session_state.user_role}.")
+        st.write(f"Welcome {st.session_state.user}! You are logged in as {st.session_state.user_role} and User ID {st.session_state.user_id}.")
     else:
         st.write("Please log in to access the application.")
     
-    if st.session_state.logged_in and st.session_state.user_role == 'admin':
+    if st.session_state.logged_in and st.session_state.user_role == 'superadmin':
         st.sidebar.subheader("Register New User")
         new_username = st.sidebar.text_input("New Username", key='reg_username')
         new_password = st.sidebar.text_input("New Password", type="password", key='reg_password')
@@ -682,7 +761,7 @@ def main():
             else:
                 st.sidebar.error("Registration failed. The username might already be taken.")
     elif st.session_state.logged_in:
-        st.sidebar.info("Only admin users can register new users.")
+        st.sidebar.info("Only super admin users can register new users.")
 
     if st.session_state.logged_in:
         # Main application content goes here
@@ -693,9 +772,9 @@ def main():
             
             # Setting y-ticks with corresponding percentages
             plt.xticks([0.5, 1.5, 2.5, 3.5, 4.5], 
-                       ['Negligible', 'Minor', 'Moderate', 'Major', 'Catastrophic'])
+                       ['Very Low', 'Low', 'Medium', 'High', 'Very High'])
             plt.yticks([0.5, 1.5, 2.5, 3.5, 4.5], 
-                       ['Rare\n(0%-10%)', 'Unlikely\n(11%-25%)', 'Possible\n(26%-50%)', 'Likely\n(51%-90%)', 'Almost Certain\n(91%-100%)'])
+                       ['Very Low\n(0%-10%)', 'Low\n(11%-25%)', 'Medium\n(26%-50%)', 'High\n(51%-90%)', 'Very High\n(91%-100%)'])
 
             plt.xlim(0, 5)
             plt.ylim(0, 5)
@@ -732,7 +811,7 @@ def main():
                 'Low': green,
                 'Moderate': yellow,
                 'High': orange,
-                'Extreme': red
+                'Critical': red
             }
 
             for label, positions in labels.items():
@@ -742,25 +821,22 @@ def main():
             return fig  # Return the figure object
 
        
-        risk_impact = {
-            'Negligible': 1, 'Minor': 2, 'Moderate': 3, 'Major': 4, 'Catastrophic': 5
-        }
-        
-        risk_probability = {
-            'Rare': 1, 'Unlikely': 2, 'Possible': 3, 'Likely': 4, 'Almost Certain': 5
+        risk_levels = {
+            'Very Low': 1, 'Low': 2, 'Medium': 3, 'High': 4, 'Very High': 5
         }
         
         risk_rating_dict = {
             (1, 1): 'Low', (1, 2): 'Low', (1, 3): 'Low', (1, 4): 'Low', (1, 5): 'Moderate',
             (2, 1): 'Low', (2, 2): 'Low', (2, 3): 'Moderate', (2, 4): 'Moderate', (2, 5): 'High',
             (3, 1): 'Low', (3, 2): 'Moderate', (3, 3): 'Moderate', (3, 4): 'High', (3, 5): 'High',
-            (4, 1): 'Moderate', (4, 2): 'High', (4, 3): 'High', (4, 4): 'Extreme', (4, 5): 'Extreme',
-            (5, 1): 'High', (5, 2): 'Extreme', (5, 3): 'Extreme', (5, 4): 'Extreme', (5, 5): 'Extreme'
+            (4, 1): 'Moderate', (4, 2): 'High', (4, 3): 'High', (4, 4): 'Critical', (4, 5): 'Critical',
+            (5, 1): 'High', (5, 2): 'Critical', (5, 3): 'Critical', (5, 4): 'Critical', (5, 5): 'Critical'
         }
 
-        
+      
+       
 #         def calculate_risk_rating(probability, impact):
-#             risk_level_num = risk_probability.get(probability, None), risk_impact.get(impact, None)
+#             risk_level_num = risk_levels.get(probability, None), risk_levels.get(impact, None)
 #             rating = risk_rating_dict.get(risk_level_num, 'Unknown')
 #             if rating == 'Low':
 #                 rating = 'Medium'  # Correcting the erroneous 'Low' rating
@@ -768,12 +844,13 @@ def main():
 
 
         def calculate_risk_rating(probability, impact):
-            return risk_rating_dict[(risk_probability[probability], risk_impact[impact])]
+            return risk_rating_dict[(risk_levels[probability], risk_levels[impact])]
 
         tab = st.sidebar.selectbox(
             'Choose a function',
             ('Risk Matrix', 'Main Application', 'Risks Overview', 'Risks Owners & Control Owners', 
-             'Adjusted Risk Matrices', 'Performance Metrics', 'Reports','Delete Risk', 'Update Risk')
+             'Adjusted Risk Matrices', 'Performance Metrics', 'Reports','Delete Risk', 'Update Risk', 
+             'Delete/Update User')
         )
 
         if 'risk_data' not in st.session_state:
@@ -800,12 +877,6 @@ def main():
 
         if 'updated_by' not in st.session_state:
             st.session_state['updated_by'] = ''
-            
-        if 'Product_Type' not in st.session_state:
-            st.session_state['Product_Type'] = ''
-            
-        if 'Status' not in st.session_state:
-            st.session_state['Status'] = ''
 
         if 'date_last_updated' not in st.session_state:
             st.session_state['date_last_updated'] = pd.to_datetime('today')
@@ -848,28 +919,28 @@ def main():
             
             # Define risk types and their corresponding appetite levels
             risk_data = [
-                ('Product Performance Risk', 'Low'),
-                ('Adverse Event Risk', 'Low'),
-                ('User-Related Risk', 'Moderate'),
-                ('Maufacturing and Supply Chain Risk', 'Low', 'Moderate'),
-                ('Environmental Risk', 'Low'),
-                ('Regulatory and Compliance Risk', 'Low'),
-                ('Patient-Related Risk', 'Low'),
-                ('Clinical and Operational Risk', 'Moderate'),
-                ('Economic and Financial Risk', 'Moderate', 'High'),
-                ('Public Perception and Social Risk', 'Low', 'Moderate'),
-                ('Cybersecurity Risk', 'Low'),
-                ('End-of-Life Risk', 'Moderate')
+                ("Strategic Risk", "Moderate", "High", "Critical"),
+                ("Operational Risk", "Low", "Moderate", "High"),
+                ("Compliance Risk", "Low", "Moderate", "High"),
+                ("Reputation Risk", "Low", "Moderate", "High"),
+                ("Financial Risk", "Low", "Moderate", "High"),
+                ("Regulatory Risk", "Moderate", "High", "Critical"),
+                ("Environmental Risk", "Low", "Moderate"),
+                ("Human Resources Risk", "Moderate", "High"),
+                ("Supply Chain Risk", "Low", "Moderate", "High"),
+                ("Ethical Risk", "Low", "Moderate"),
+                ("Technologica Risk", "Moderate", "High", "Critical"),
+                ("Public Health Risk", "Low", "Moderate", "High")
             ]
             
-            
+                       
             # Sort the risks alphabetically by the first element in each tuple
             risk_data.sort(key=lambda x: x[0])
 
             # Define colors for risk levels
             color_map = {
                 'High': 'orange',
-                'Extreme': 'red',
+                'Critical': 'red',
                 'Low': 'green',
                 'Moderate': 'yellow'
             }
@@ -938,57 +1009,51 @@ def main():
                 st.error("Error in creating the risk appetite matrix plot.")
         
         elif tab == 'Main Application':
+            
+            engine = connect_to_db()
+            
             if 'risk_data' not in st.session_state:
                 st.session_state['risk_data'] = fetch_all_from_risk_data(engine) 
                                  
             st.subheader('Enter Risk Details')
-            
+          
             st.session_state['risk_type'] = st.selectbox('Risk Type', sorted([
-                'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
-                'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
-                'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
-                'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
+                'Strategic Risk', 'Operational Risk', 'Compliance Risk', 'Reputational Risk', 'Financial Risk',
+                'Regulatory Risk', 'Envioronmental Risk', 'Human Resource Risk',
+                'Supply Chain Risk', 'Ethical Risk', 'Technological Risk', 'Public Health Risk'
             ]))
-
-            # Load picklist options
-            options = get_dosage_form_route_options()  # Assume this returns a list of tuples (id, dosage_form_route)
-
+            
             st.session_state['updated_by'] = st.text_input('Updated By')
             st.session_state['date_last_updated'] = st.date_input('Date Last Updated')
             risk_description = st.text_input('Risk Description', key='risk_description')
             cause_consequences = st.text_input('Cause & Consequences', key='cause_consequences')
             risk_owners = st.text_input('Risk Owner(s)', key='risk_owners')
-            inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), key='inherent_risk_probability')
-            inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), key='inherent_risk_impact')
+            inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_levels.keys()), key='inherent_risk_probability')
+            inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_levels.keys()), key='inherent_risk_impact')
             controls = st.text_input('Control(s)', key='controls')
+
+            # New field for Adequacy
+            adequacy = st.selectbox('Adequacy', ['Weak', 'Acceptable', 'Strong'], key='adequacy')
+
             control_owners = st.text_input('Control Owner(s)', key='control_owners')
-            residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), key='residual_risk_probability')
-            residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), key='residual_risk_impact')
+            residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_levels.keys()), key='residual_risk_probability')
+            residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_levels.keys()), key='residual_risk_impact')
+
+            # New field for Direction
+            direction = st.selectbox('Direction', ['Increasing', 'Decreasing', 'Stable'], key='direction')
 
             # New field for Status
             status = st.selectbox('Status', ['Open', 'Closed'], key='status')
 
-            # Create a picklist in Streamlit for selecting Dosage Form and Route
-            picklist = st.selectbox(
-                "Select Dosage Form and Route",
-                options=options,
-                format_func=lambda x: f"{x[1]}"  # Display the actual dosage form and route
-            )
-
-            # New field for Subsidiary
-            st.session_state['Product_Type'] = st.selectbox('Product_Type', sorted([
-                'Medical Device', 'Pharmaceutical', 'Other'
+            # New field for unit
+            st.session_state['unit'] = st.selectbox('Unit', sorted([
+                'Licensing and Enforcement', 'Evaluations and Registration', 'Pharmacovigilance and Clinical Trials',
+                'Chemistry Laboratory', 'Microbiology Laboratory', 'Medical Devices Laboratory', 'Quality Unit',
+                'Legal Unit', 'Human Resources', 'Information and Communication Technology', 'Finance and Administration'
             ]))
 
-            # New fields for the added columns
-            product_name = st.text_input('Product Name', key='product_name')
-            active_ingredient = st.text_input('Active Ingredient', key='active_ingredient')
-            strength = st.text_input('Strength', key='strength')
-            lot_number = st.text_input('Lot Number', key='lot_number')
-            expiry_date = st.date_input('Expiry Date', key='expiry_date')
-            manufacturer = st.text_input('Manufacturer', key='manufacturer')
-
-            engine = connect_to_db()
+            # New field for Opportunity Type
+            opportunity_type = st.selectbox('Is there an Opportunity associated with this risk?', ['No', 'Yes'], key='opportunity_type')
 
             if st.button('Enter Risk'):
                 inherent_risk_rating = calculate_risk_rating(inherent_risk_probability, inherent_risk_impact)
@@ -1005,22 +1070,17 @@ def main():
                     'inherent_risk_impact': inherent_risk_impact,
                     'inherent_risk_rating': inherent_risk_rating,
                     'controls': controls,
+                    'adequacy': adequacy,  # Include the new adequacy field
                     'control_owners': control_owners,
                     'residual_risk_probability': residual_risk_probability,
                     'residual_risk_impact': residual_risk_impact,
                     'residual_risk_rating': residual_risk_rating,
-                    'Product_Type': st.session_state['Product_Type'],
-                    'dosage_form_route_id': picklist[0],  # Store the selected dosage_form_route_id
-                    'dosage_form_route': picklist[1],  # Store the actual dosage form and route
-                    'Product_Name': product_name,
-                    'Active_Ingredient': active_ingredient,
-                    'Strength': strength,
-                    'Lot_Number': lot_number,
-                    'Manufacturer': manufacturer,
-                    'Expiry_Date': expiry_date,
-                    'Status': status  # Add the selected status to the new_risk dictionary
+                    'direction': direction,  # Include the new direction field
+                    'unit': st.session_state['unit'],  # Include the new unit field
+                    'Status': status,  # Include the status field
+                    'opportunity_type': opportunity_type  # Include the opportunity type field
                 }
-
+          
                 # Check if a record with the same risk_description already exists
                 existing_risk = fetch_risk_by_description(risk_description)
 
@@ -1037,10 +1097,9 @@ def main():
 
                     except Exception as e:
                         st.error(f"Error inserting into risk_data: {e}")
-                         
+                    
             st.subheader('Risk Filters')
-            
-            # Connect to the database
+        
             engine = connect_to_db()
 
             # Load or fetch data
@@ -1048,18 +1107,40 @@ def main():
 
             # Initialize filtered_data as an empty DataFrame
             filtered_data = pd.DataFrame()
-
+            
             # Define colors for each risk rating
             colors = {
                 'Low': 'background-color: green',
                 'Moderate': 'background-color: yellow',
                 'High': 'background-color: orange',
-                'Extreme': 'background-color: red'
+                'Critical': 'background-color: red'
+            }
+            
+            # Define colors for each adequacy
+            colors_adequacy = {
+                'Weak': 'background-color: orange',
+                'Acceptable': 'background-color: yellow',
+                'Strong': 'background-color: green'
+            }
+            
+            # Define colors for each direction
+            colors_direction = {
+                'Increasing': 'background-color: orange',
+                'Decreasing': 'background-color: yellow',
+                'Stable': 'background-color: green'
             }
 
             # Function to apply styles
             def highlight_risk(rating):
                 return colors.get(rating, '')
+            
+            # Function to highlight adequacy based on value
+            def highlight_adequacy(val):
+                return colors_adequacy.get(val, '')
+
+            # Function to highlight direction based on value
+            def highlight_direction(val):
+                return colors_direction.get(val, '')
 
             # Check if the DataFrame is not empty and contains the 'date_last_updated' column
             if not risk_data.empty and 'date_last_updated' in risk_data.columns:
@@ -1090,39 +1171,53 @@ def main():
                                           (risk_data['date_last_updated'] <= pd.Timestamp(to_date))]
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
+                     
+            # Add a selectbox for unit filtering
+            selected_unit = st.selectbox('Select Unit', units)
 
-            # Define product types and add 'All' option, then sort alphabetically
-            product_type = [
-                'All',
-                'Medical Device',
-                'Pharmaceutical',
-                'Other'
-            ]
-            product_type.sort()
-
-            # Add a selectbox for product type filtering
-            selected_product_type = st.selectbox('Select Product Type', product_type)
-
-            # Apply product type filter if not 'All'
-            if selected_product_type != 'All':
-                filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
-
+            # Apply unit filter if not 'All'
+            if selected_unit != 'All':
+                filtered_data = filtered_data[(filtered_data['Unit'] == selected_unit) | (filtered_data['Unit'].isna())]
+                
             # Add a filter for risk owners
             risk_owners = ['All'] + sorted(risk_data['risk_owners'].dropna().unique().tolist())
             selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners)
 
             # Apply risk owners filter if not 'All'
             if selected_risk_owner != 'All':
-                filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner]
+                filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner] 
+                
+            # Initialize filtered_data
+            filtered_data = risk_data.copy() if not risk_data.empty else pd.DataFrame()
+
+            # Check if 'risk_category' exists and has data
+            if 'risk_category' in risk_data.columns and not risk_data['risk_category'].dropna().empty:
+                # Add a filter for risk category
+                risk_categories = ['All'] + sorted(risk_data['risk_category'].dropna().unique().tolist())
+            else:
+                # Default to 'All' if no data or column missing
+                risk_categories = ['All']
+
+            # Selectbox for risk category
+            selected_risk_category = st.selectbox('Select Risk Category', risk_categories)
+
+            # Apply risk category filter if not 'All' and if column exists
+            if selected_risk_category != 'All' and 'risk_category' in risk_data.columns:
+                filtered_data = filtered_data[filtered_data['risk_category'] == selected_risk_category]
+            else:
+                st.warning("No risk category data available or no filter applied.")
 
             st.subheader('Risk Data')
 
             # Display the filtered data or a message if it's empty
             if filtered_data.empty:
-                st.info("No data available for the selected filters.")
+                st.info("No data available for the selected date range and unit.")
             else:
-                # Apply the style to both columns
-                styled_risk_data = filtered_data.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating'])
+                # Apply the style to all relevant columns
+                styled_risk_data = filtered_data.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating']) \
+                    .applymap(highlight_adequacy, subset=['Adequacy']) \
+                    .applymap(highlight_direction, subset=['Direction'])
+#                 styled_risk_data = filtered_data.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating'])
 
                 # Display the styled dataframe in Streamlit
                 st.dataframe(styled_risk_data)
@@ -1142,12 +1237,14 @@ def main():
             st.subheader('Risk Register')
             
             # Check for required columns before applying further filtering
-            if 'inherent_risk_rating' in filtered_data.columns and 'residual_risk_rating' in filtered_data.columns and 'risk_type' in filtered_data.columns:
+            required_columns = ['inherent_risk_rating', 'residual_risk_rating', 'risk_type', 'Adequacy', 'Direction', 'opportunity_type']
+
+            if all(column in filtered_data.columns for column in required_columns):
                 filtered_data['risk_appetite'] = filtered_data['risk_type'].apply(get_risk_appetite)
 
                 def residual_exceeds_appetite(row):
                     # Define a mapping of risk levels for comparison purposes
-                    risk_levels = ['Low', 'Moderate', 'High', 'Extreme']
+                    risk_levels = ['Low', 'Moderate', 'High', 'Critical']
 
                     # Check if risk appetite is empty
                     if not row['risk_appetite']:
@@ -1157,15 +1254,26 @@ def main():
                     max_appetite_level = max(row['risk_appetite'], key=lambda level: risk_levels.index(level))
 
                     # Check if residual risk rating exceeds the maximum appetite level
-                    return risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
+                    exceeds_appetite = risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
 
+                    # Check if the risk is flagged as an opportunity
+                    accepted_due_to_opportunity = row['opportunity_type'] == 'Yes'
+
+                    if exceeds_appetite and not accepted_due_to_opportunity:
+                        return True
+
+                    return False
+
+                # Filter the DataFrame based on the residual_exceeds_appetite function
                 risk_register = filtered_data[filtered_data.apply(residual_exceeds_appetite, axis=1)]
 
                 if not risk_register.empty:
                     # Apply the style to both columns
-                    styled_risk_data = risk_register.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating'])
+                    styled_risk_data = risk_register.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating']) \
+                        .applymap(highlight_adequacy, subset=['Adequacy']) \
+                        .applymap(highlight_direction, subset=['Direction'])
 
-                    # Display the styled dataframe in Streamlit
+                    # Display the styled DataFrame in Streamlit
                     st.dataframe(styled_risk_data)
 
                     # Convert the risk register to CSV format
@@ -1185,7 +1293,40 @@ def main():
                     st.write("No risk register data available to display or download.")
             else:
                 st.warning("The data is missing required columns for filtering.")
-                
+        
+            st.subheader('Opportunities Data')
+
+            # Display the filtered data or a message if it's empty
+            if filtered_data.empty:
+                st.info("No data available for the selected date range and unit.")
+            else:
+                # Filter the data to show only opportunities
+                opportunity_data = filtered_data[filtered_data['opportunity_type'] == 'Yes']
+
+                # Check if there are any opportunities after filtering
+                if opportunity_data.empty:
+                    st.info("No opportunities available.")
+                else:
+                    # Apply the style to all relevant columns
+                    styled_risk_data = opportunity_data.style.applymap(highlight_risk, subset=['inherent_risk_rating', 'residual_risk_rating']) \
+                        .applymap(highlight_adequacy, subset=['Adequacy']) \
+                        .applymap(highlight_direction, subset=['Direction'])
+
+                    # Display the styled dataframe in Streamlit
+                    st.dataframe(styled_risk_data)
+
+                    # Prepare data for download (unstyled data)
+                    csv = opportunity_data.to_csv(index=False)
+                    current_datetime = datetime.now().strftime('%Y%m%d%H%M%S')
+
+                    # Provide a download button for the CSV file
+                    st.download_button(
+                        label="Download Opportunities Data",
+                        data=csv,
+                        file_name=f"opportunity_data_{current_datetime}.csv",
+                        mime="text/csv",
+                    )
+            
         elif tab == 'Risks Overview':
             st.markdown("""
             <style>
@@ -1206,7 +1347,7 @@ def main():
             st.subheader('Risk Filters')
             
             engine = connect_to_db()
-
+            
             # Load data from session state
             risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
 
@@ -1243,22 +1384,13 @@ def main():
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
 
-            # Define product types and add 'All' option, then sort alphabetically
-            product_type = [
-                'All',
-                'Medical Device',
-                'Pharmaceutical',
-                'Other'
-            ]
-            product_type.sort()
+            # Add a selectbox for unit filtering
+            selected_unit = st.selectbox('Select Unit', units)
 
-            # Add a selectbox for product type filtering
-            selected_product_type = st.selectbox('Select Product Type', product_type)
-
-            # Apply product type filter if not 'All'
-            if selected_product_type != 'All':
-                filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
-
+            # Apply unit filter if not 'All'
+            if selected_unit != 'All':
+                filtered_data = filtered_data[(filtered_data['Unit'] == selected_unit) | (filtered_data['Unit'].isna())]
+                
             # Add a filter for risk owners
             risk_owners = ['All'] + sorted(risk_data['risk_owners'].dropna().unique().tolist())
             selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners)
@@ -1271,7 +1403,7 @@ def main():
 
             # Display the filtered data or a message if it's empty
             if filtered_data.empty:
-                st.info("No data available for the selected filters.")
+                st.info("No data available for the selected date range and unit.")
             else:
                 # Before Risk Appetite Analysis
                 st.subheader('Before Risk Appetite')
@@ -1279,14 +1411,14 @@ def main():
                 if 'inherent_risk_rating' in filtered_data.columns:
                     risk_rating_counts = filtered_data['inherent_risk_rating'].value_counts()
 
-                    critical_count = risk_rating_counts.get('Extreme', 0)
+                    critical_count = risk_rating_counts.get('Critical', 0)
                     severe_count = risk_rating_counts.get('High', 0)
                     moderate_count = risk_rating_counts.get('Moderate', 0)
                     sustainable_count = risk_rating_counts.get('Low', 0)
 
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Extreme Inherent Risks", critical_count)
+                        st.metric("Critical Inherent Risks", critical_count)
                     with col2:
                         st.metric("High Inherent Risks", severe_count)
                     with col3:
@@ -1299,14 +1431,14 @@ def main():
                 if 'residual_risk_rating' in filtered_data.columns:
                     residual_risk_rating_counts = filtered_data['residual_risk_rating'].value_counts()
 
-                    residual_critical_count = residual_risk_rating_counts.get('Extreme', 0)
+                    residual_critical_count = residual_risk_rating_counts.get('Critical', 0)
                     residual_severe_count = residual_risk_rating_counts.get('High', 0)
                     residual_moderate_count = residual_risk_rating_counts.get('Moderate', 0)
                     residual_sustainable_count = residual_risk_rating_counts.get('Low', 0)
 
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Extreme Residual Risks", residual_critical_count)
+                        st.metric("Critical Residual Risks", residual_critical_count)
                     with col2:
                         st.metric("High Residual Risks", residual_severe_count)
                     with col3:
@@ -1336,17 +1468,34 @@ def main():
                     st.pyplot(fig)
                 else:
                     st.warning("The column 'risk_type' is missing from the data.")
+                    
+                # Display Risk Dashboard
+                st.subheader("Risk Count by Risk Type")
+                risk_dashboard = create_risk_dashboard(risk_data)
+                st.dataframe(risk_dashboard)
+                
+                # Prepare data for download (unstyled data)
+                csv = risk_dashboard.to_csv(index=False)
+                current_datetime = datetime.now().strftime('%Y%m%d%H%M%S')
+
+                # Provide a download button for the CSV file
+                st.download_button(
+                    label="Download Rish Dashboard",
+                    data=csv,
+                    file_name=f"risk_dashboard_{current_datetime}.csv",
+                    mime="text/csv",
+                )
 
                 # After Risk Appetite Analysis
                 st.subheader('After Risk Appetite')
-
+                              
                 # Check for required columns before applying further filtering
                 if 'inherent_risk_rating' in filtered_data.columns and 'residual_risk_rating' in filtered_data.columns and 'risk_type' in filtered_data.columns:
                     filtered_data['risk_appetite'] = filtered_data['risk_type'].apply(get_risk_appetite)
-
+                    
                     def residual_exceeds_appetite(row):
                         # Define a mapping of risk levels for comparison purposes
-                        risk_levels = ['Low', 'Moderate', 'High', 'Extreme']
+                        risk_levels = ['Low', 'Moderate', 'High', 'Critical']
 
                         # Check if risk appetite is empty
                         if not row['risk_appetite']:
@@ -1356,20 +1505,28 @@ def main():
                         max_appetite_level = max(row['risk_appetite'], key=lambda level: risk_levels.index(level))
 
                         # Check if residual risk rating exceeds the maximum appetite level
-                        return risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
+                        exceeds_appetite = risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
+
+                        # Check if the risk is flagged as an opportunity
+                        accepted_due_to_opportunity = row['opportunity_type'] == 'Yes'
+
+                        # If it exceeds the appetite but is accepted due to an opportunity, consider it acceptable
+                        if exceeds_appetite and accepted_due_to_opportunity:
+                            return False
+                        return exceeds_appetite
 
                     risk_register = filtered_data[filtered_data.apply(residual_exceeds_appetite, axis=1)]
 
                     risk_rating_counts = risk_register['inherent_risk_rating'].value_counts()
 
-                    critical_count = risk_rating_counts.get('Extreme', 0)
+                    critical_count = risk_rating_counts.get('Critical', 0)
                     severe_count = risk_rating_counts.get('High', 0)
                     moderate_count = risk_rating_counts.get('Moderate', 0)
                     sustainable_count = risk_rating_counts.get('Low', 0)
 
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Extreme Inherent Risks", critical_count)
+                        st.metric("Critical Inherent Risks", critical_count)
                     with col2:
                         st.metric("High Inherent Risks", severe_count)
                     with col3:
@@ -1379,14 +1536,14 @@ def main():
 
                     residual_risk_rating_counts = risk_register['residual_risk_rating'].value_counts()
 
-                    residual_critical_count = residual_risk_rating_counts.get('Extreme', 0)
+                    residual_critical_count = residual_risk_rating_counts.get('Critical', 0)
                     residual_severe_count = residual_risk_rating_counts.get('High', 0)
                     residual_moderate_count = residual_risk_rating_counts.get('Moderate', 0)
                     residual_sustainable_count = residual_risk_rating_counts.get('Low', 0)
 
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Extreme Residual Risks", residual_critical_count)
+                        st.metric("Critical Residual Risks", residual_critical_count)
                     with col2:
                         st.metric("High Residual Risks", residual_severe_count)
                     with col3:
@@ -1416,7 +1573,8 @@ def main():
                         st.warning("The column 'risk_type' is missing from the risk register data.")
                 else:
                     st.warning("The necessary columns for 'inherent_risk_rating' or 'residual_risk_rating' are missing from the data.")
-
+                    
+                
         elif tab == 'Risks Owners & Control Owners':
             st.markdown("""
             <style>
@@ -1519,7 +1677,7 @@ def main():
           
         elif tab == 'Adjusted Risk Matrices':
             color_mapping = {
-                "Extreme": "red",
+                "Critical": "red",
                 "High": "orange",
                 "Moderate": "yellow",
                 "Low": "green",
@@ -1529,8 +1687,8 @@ def main():
             def plot_risk_matrix_with_axes_labels(matrix, risk_matrix, title, master_risk_matrix=None):
                 fig = plt.figure(figsize=(10, 10))
                 plt.subplots_adjust(wspace=0, hspace=0)
-                plt.xticks([0.5, 1.5, 2.5, 3.5, 4.5], ['Negligible', 'Minor', 'Moderate', 'Major', 'Catastrophic'])
-                plt.yticks([0.5, 1.5, 2.5, 3.5, 4.5], ['Rare', 'Unlikely', 'Possible', 'Likely', 'Almost Certain'])
+                plt.xticks([0.5, 1.5, 2.5, 3.5, 4.5], ['Very Low', 'Low', 'Medium', 'High', 'Very High'])
+                plt.yticks([0.5, 1.5, 2.5, 3.5, 4.5], ['Very Low', 'Low', 'Medium', 'High', 'Very High'])
                 plt.xlim(0, 5)
                 plt.ylim(0, 5)
                 plt.xlabel('Impact')
@@ -1572,7 +1730,7 @@ def main():
                 'Low': 'background-color: green',
                 'Moderate': 'background-color: yellow',
                 'High': 'background-color: orange',
-                'Extreme': 'background-color: red'
+                'Critical': 'background-color: red'
             }
 
             # Function to apply styles
@@ -1617,46 +1775,37 @@ def main():
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
 
-            # Define subsidiaries and add 'All' option, then sort alphabetically
-            product_type = [
-                'All',
-                'Medical Device',
-                'Pharmcaceutical',
-                'Other'
-            ]
-            product_type.sort()
+            # Add a selectbox for unit filtering
+            selected_unit = st.selectbox('Select Unit', units)
 
-            # Add a selectbox for subsidiary filtering
-            selected_product_type = st.selectbox('Select Product Type', product_type)
+            # Apply unit filter if not 'All'
+            if selected_unit != 'All':
+                filtered_data = filtered_data[(filtered_data['Unit'] == selected_unit) | (filtered_data['Unit'].isna())]
+                
+            # Add a filter for risk owners
+            risk_owners = ['All'] + sorted(risk_data['risk_owners'].dropna().unique().tolist())
+            selected_risk_owner = st.selectbox('Select Risk Owner', risk_owners)
 
-            # Apply subsidiary filter if not 'All'
-            if selected_product_type != 'All':
-                filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
+            # Apply risk owners filter if not 'All'
+            if selected_risk_owner != 'All':
+                filtered_data = filtered_data[filtered_data['risk_owners'] == selected_risk_owner]
 
             st.subheader('Risk Data')
 
             # If filtered_data is empty, provide a message and set default date inputs
             if filtered_data.empty:
-                st.info("No data available for the selected date range and subsidiary.")
+                st.info("No data available for the selected date range and unit.")
 
             else:
                 # Before Risk Appetite Analysis
                 st.subheader('Before Risk Appetite')
-                
-                impact_mapping = {
-                    "Negligible": 1,
-                    "Minor": 2,
-                    "Moderate": 3,
-                    "Major": 4,
-                    "Catastrophic": 5
-                }
 
                 probability_mapping = {
-                    "Rare": 1,
-                    "Unlikely": 2,
-                    "Possible": 3,
-                    "Likely": 4,
-                    "Almost Certain": 5
+                    "Very Low": 1,
+                    "Low": 2,
+                    "Medium": 3,
+                    "High": 4,
+                    "Very High": 5
                 }
 
                 required_columns = [
@@ -1669,9 +1818,9 @@ def main():
                     st.error(f"Missing columns in risk_data: {', '.join(missing_columns)}")
                 else:
                     filtered_data['inherent_risk_probability_num'] = filtered_data['inherent_risk_probability'].map(probability_mapping)
-                    filtered_data['inherent_risk_impact_num'] = filtered_data['inherent_risk_impact'].map(impact_mapping)
+                    filtered_data['inherent_risk_impact_num'] = filtered_data['inherent_risk_impact'].map(probability_mapping)
                     filtered_data['residual_risk_probability_num'] = filtered_data['residual_risk_probability'].map(probability_mapping)
-                    filtered_data['residual_risk_impact_num'] = filtered_data['residual_risk_impact'].map(impact_mapping)
+                    filtered_data['residual_risk_impact_num'] = filtered_data['residual_risk_impact'].map(probability_mapping)
 
                     inherent_risk_matrix = np.empty((5, 5), dtype=object)
                     residual_risk_matrix = np.empty((5, 5), dtype=object)
@@ -1694,13 +1843,13 @@ def main():
                             residual_risk_count_matrix[5 - prob_num, impact_num - 1] += 1
 
                     master_risk_matrix = np.array([
-                        ["Moderate", "High", "High", "Extreme", "Extreme"],
-                        ["Low", "Moderate", "High", "Extreme", "Extreme"],
-                        ["Low", "Moderate", "Moderate", "High", "Extreme"],
-                        ["Low", "Low", "Moderate", "High", "Extreme"],
+                        ["Moderate", "High", "High", "Critical", "Critical"],
+                        ["Low", "Moderate", "High", "Critical", "Critical"],
+                        ["Low", "Moderate", "Moderate", "High", "Critical"],
+                        ["Low", "Low", "Moderate", "High", "Critical"],
                         ["Low", "Low", "Low", "Moderate", "High"]
                     ])
-
+                    
                     for i in range(5):
                         for j in range(5):
                             if not inherent_risk_matrix[i, j]:
@@ -1719,7 +1868,7 @@ def main():
 
                         def residual_exceeds_appetite(row):
                             # Define a mapping of risk levels for comparison purposes
-                            risk_levels = ['Low', 'Moderate', 'High', 'Extreme']
+                            risk_levels = ['Low', 'Moderate', 'High', 'Critical']
 
                             # Check if risk appetite is empty
                             if not row['risk_appetite']:
@@ -1729,7 +1878,15 @@ def main():
                             max_appetite_level = max(row['risk_appetite'], key=lambda level: risk_levels.index(level))
 
                             # Check if residual risk rating exceeds the maximum appetite level
-                            return risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
+                            exceeds_appetite = risk_levels.index(row['residual_risk_rating']) > risk_levels.index(max_appetite_level)
+
+                            # Check if the risk is flagged as an opportunity
+                            accepted_due_to_opportunity = row['opportunity_type'] == 'Yes'
+
+                            # If it exceeds the appetite but is accepted due to an opportunity, consider it acceptable
+                            if exceeds_appetite and accepted_due_to_opportunity:
+                                return False
+                            return exceeds_appetite
 
                         risk_register = filtered_data[filtered_data.apply(residual_exceeds_appetite, axis=1)]
 
@@ -1770,8 +1927,9 @@ def main():
            
         elif tab == 'Performance Metrics':
             st.title('Performance Metrics')
-            st.subheader('Risk Filters')
             
+            st.subheader('Risk Filters')
+
             # Main code starts here
             engine = connect_to_db()
 
@@ -1811,22 +1969,6 @@ def main():
             else:
                 st.warning("The data is empty or missing the 'date_last_updated' column.")
 
-            # Define product types and add 'All' option, then sort alphabetically
-            product_type = [
-                'All',
-                'Medical Device',
-                'Pharmaceutical',
-                'Other'
-            ]
-            product_type.sort()
-
-            # Add a selectbox for product type filtering
-            selected_product_type = st.selectbox('Select Product Type', product_type)
-
-            # Apply product type filter if not 'All'
-            if selected_product_type != 'All':
-                filtered_data = filtered_data[(filtered_data['Product_Type'] == selected_product_type) | (filtered_data['Product_Type'].isna())]
-
             # Check if 'residual_risk_rating' column exists in the filtered data
             if 'residual_risk_rating' in filtered_data.columns:
                 # Define residual risk ratings and add 'All' option
@@ -1860,137 +2002,209 @@ def main():
             # Display filtered data for debugging purposes
             # st.write("Filtered Data:", filtered_data)
 
-            # Check if filtered_data is not empty and proceed with the rest of your code
-            if not filtered_data.empty:
-                # Pie chart for Dosage Form Route Distribution using the filtered data
-                st.subheader('Dosage Form Route Distribution')
-                df_dosage = fetch_dosage_form_route_distribution(filtered_data)
-                if df_dosage.empty:
-                    st.warning("No data available to display.")
-                else:
-                    # Create labels that include both the dosage form route and the count
-                    labels_dosage = [f"{row['dosage_form_route']} ({row['count']})" for _, row in df_dosage.iterrows()]
+            # Pie chart for Residual Risk Rating Distribution using the filtered data
+            st.subheader("Residual Risk Rating Distribution")
 
-                    fig, ax = plt.subplots()
-                    ax.pie(df_dosage['count'], labels=labels_dosage, autopct=make_autopct(df_dosage['count']), startangle=90)
-                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-                    st.pyplot(fig)
+            # Group the filtered data by 'residual_risk_rating' and count the occurrences
+            rating_distribution = filtered_data['residual_risk_rating'].value_counts().reset_index()
+            rating_distribution.columns = ['residual_risk_rating', 'count']
 
-                # Pie chart for Residual Risk Rating Distribution using the filtered data
-                st.subheader("Residual Risk Rating Distribution")
-
-                # Group the filtered data by 'residual_risk_rating' and count the occurrences
-                rating_distribution = filtered_data['residual_risk_rating'].value_counts().reset_index()
-                rating_distribution.columns = ['residual_risk_rating', 'count']
-
-                if rating_distribution.empty:
-                    st.warning("No data available to display.")
-                else:
-                    # Create labels that include both the residual risk rating and the count
-                    labels_risk = [f"{row['residual_risk_rating']} ({row['count']})" for _, row in rating_distribution.iterrows()]
-
-                    fig, ax = plt.subplots()
-                    ax.pie(rating_distribution['count'], labels=labels_risk, autopct=make_autopct(rating_distribution['count']), startangle=90)
-                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-                    st.pyplot(fig)
-
-                # Pie chart for Risk 'Status' Distribution using the filtered data
-                st.subheader("Risk Status Distribution")
-
-                # Group the filtered data by 'Status' and count the occurrences
-                status_distribution = filtered_data['Status'].value_counts().reset_index()
-                status_distribution.columns = ['Status', 'count']
-
-                if status_distribution.empty:
-                    st.warning("No data available to display.")
-                else:
-                    # Create labels that include both the risk status and the count
-                    labels_status = [f"{row['Status']} ({row['count']})" for _, row in status_distribution.iterrows()]
-
-                    fig, ax = plt.subplots()
-                    ax.pie(status_distribution['count'], labels=labels_status, autopct=make_autopct(status_distribution['count']), startangle=90)
-                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-                    st.pyplot(fig)
-
-                # Pie chart for 'Time Open' Distribution using the filtered data
-                st.subheader("Time Open Distribution(Days)")
-
-                # Group the filtered data by 'Time Open' and count the occurrences
-                time_open_distribution = filtered_data['Time Open'].value_counts().reset_index()
-                time_open_distribution.columns = ['Time Open', 'count']
-
-                if time_open_distribution.empty:
-                    st.warning("No data available to display.")
-                else:
-                    # Create labels that include both the 'Time Open' value and the count
-                    labels_time_open = [f"{row['Time Open']} ({row['count']})" for _, row in time_open_distribution.iterrows()]
-
-                    fig, ax = plt.subplots()
-                    ax.pie(time_open_distribution['count'], labels=labels_time_open, autopct=make_autopct(time_open_distribution['count']), startangle=90)
-                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-                    st.pyplot(fig)
-
+            if rating_distribution.empty:
+                st.warning("No data available to display.")
             else:
+                # Create labels that include both the residual risk rating and the count
+                labels_risk = [f"{row['residual_risk_rating']} ({row['count']})" for _, row in rating_distribution.iterrows()]
+
+                fig, ax = plt.subplots()
+                ax.pie(rating_distribution['count'], labels=labels_risk, autopct=make_autopct(rating_distribution['count']), startangle=90)
+                ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                st.pyplot(fig)
+
+            # Pie chart for Risk 'Status' Distribution using the filtered data
+            st.subheader("Risk Status Distribution")
+
+            # Group the filtered data by 'Status' and count the occurrences
+            status_distribution = filtered_data['Status'].value_counts().reset_index()
+            status_distribution.columns = ['Status', 'count']
+
+            if status_distribution.empty:
+                st.warning("No data available to display.")
+            else:
+                # Create labels that include both the risk status and the count
+                labels_status = [f"{row['Status']} ({row['count']})" for _, row in status_distribution.iterrows()]
+
+                fig, ax = plt.subplots()
+                ax.pie(status_distribution['count'], labels=labels_status, autopct=make_autopct(status_distribution['count']), startangle=90)
+                ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                st.pyplot(fig)
+
+            # Pie chart for 'Time Open' Distribution using the filtered data
+            st.subheader("Time Open Distribution (Days)")
+
+            # Group the filtered data by 'Time Open' and count the occurrences
+            time_open_distribution = filtered_data['Time Open'].value_counts().reset_index()
+            time_open_distribution.columns = ['Time Open', 'count']
+
+            if time_open_distribution.empty:
+                st.warning("No data available to display.")
+            else:
+                # Create labels that include both the 'Time Open' value and the count
+                labels_time_open = [f"{row['Time Open']} ({row['count']})" for _, row in time_open_distribution.iterrows()]
+
+                fig, ax = plt.subplots()
+                ax.pie(time_open_distribution['count'], labels=labels_time_open, autopct=make_autopct(time_open_distribution['count']), startangle=90)
+                ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                st.pyplot(fig)
+
+            if filtered_data.empty:
+                st.warning("No data available after filtering.")
+                
+            # Pie chart for 'opportunity_type' Distribution using the filtered data
+            st.subheader("Risk Category Distribution")
+            
+            # Group the filtered data by 'opportunity_type' and count the occurrences
+            opportunity_type_distribution = filtered_data['opportunity_type'].value_counts().reset_index()
+            opportunity_type_distribution.columns = ['opportunity_type', 'count']
+
+            if opportunity_type_distribution.empty:
+                st.warning("No data available to display.")
+            else:
+                # Map 'Yes' to 'Opportunity' and 'No' to 'Risk'
+                opportunity_type_distribution['description'] = opportunity_type_distribution['opportunity_type'].map({
+                    'Yes': 'Opportunities',
+                    'No': 'Threats'
+                })
+
+                # Create labels that include both the description and the count
+                labels_opportunity_type = [f"{row['description']} ({row['count']})" for _, row in opportunity_type_distribution.iterrows()]
+
+                fig, ax = plt.subplots()
+                ax.pie(opportunity_type_distribution['count'], labels=labels_opportunity_type, autopct='%1.1f%%', startangle=90)
+                ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+                st.pyplot(fig)
+
+            if filtered_data.empty:
                 st.warning("No data available after filtering.")
 
-        elif tab == 'Reports':
-            st.title('Reports')
+              
+            # Display KPIs
+            st.subheader("Risk Management KPIs")
+            st.subheader('Critical Risks')
+            # 1. Risk Reduction KPI
+            risk_reduction_kpi_description = """
+            **Risk Reduction KPI (%):** 
+            This KPI measures the effectiveness of risk treatment plans in reducing critical risks. 
+            It calculates the percentage of critical risks that have been downgraded to a less severe rating after treatment.
+            """
+            st.markdown(risk_reduction_kpi_description)
+            st.metric("Risk Reduction KPI (%)", f"{calculate_kpis(risk_data)['Risk Reduction KPI (%)']:.2f}%")
+
+            # 2. Action Completion KPI
+            action_completion_kpi_description = """
+            **Action Completion KPI (%):** 
+            This KPI tracks the progress of risk treatment plans by measuring the percentage of planned risk treatment actions 
+            that have been completed on time. It is an indicator of how well the risk treatment process is being managed.
+            """
+            st.markdown(action_completion_kpi_description)
+            st.metric("Action Completion KPI (%)", f"{calculate_kpis(risk_data)['Action Completion KPI (%)']:.2f}%")
+
+            # 3. Residual Risk KPI
+            residual_risk_kpi_description = """
+            **Residual Risk KPI (%):** 
+            This KPI measures the proportion of risks that remain critical after treatment actions have been implemented. 
+            A high percentage indicates that more work is needed to mitigate these risks effectively.
+            """
+            st.markdown(residual_risk_kpi_description)
+            st.metric("Residual Risk KPI (%)", f"{calculate_kpis(risk_data)['Residual Risk KPI (%)']:.2f}%")
             
-            # Main code starts here
+            st.subheader('High Risks')
+            # 1. Risk Reduction KPI
+            risk_reduction_kpi_description = """
+            **Risk Reduction KPI (%):** 
+            This KPI measures the effectiveness of risk treatment plans in reducing high risks. 
+            It calculates the percentage of high risks that have been downgraded to a less severe rating after treatment.
+            """
+            st.markdown(risk_reduction_kpi_description)
+            st.metric("Risk Reduction KPI (%)", f"{calculate_kpis_high(risk_data)['Risk Reduction KPI (%)']:.2f}%")
+
+            # 2. Action Completion KPI
+            action_completion_kpi_description = """
+            **Action Completion KPI (%):** 
+            This KPI tracks the progress of risk treatment plans by measuring the percentage of planned risk treatment actions 
+            that have been completed on time. It is an indicator of how well the risk treatment process is being managed.
+            """
+            st.markdown(action_completion_kpi_description)
+            st.metric("Action Completion KPI (%)", f"{calculate_kpis_high(risk_data)['Action Completion KPI (%)']:.2f}%")
+
+            # 3. Residual Risk KPI
+            residual_risk_kpi_description = """
+            **Residual Risk KPI (%):** 
+            This KPI measures the proportion of risks that remain high after treatment actions have been implemented. 
+            A high percentage indicates that more work is needed to mitigate these risks effectively.
+            """
+            st.markdown(residual_risk_kpi_description)
+            st.metric("Residual Risk KPI (%)", f"{calculate_kpis_high(risk_data)['Residual Risk KPI (%)']:.2f}%")
+            
+            # Load or fetch data (replace with your data loading logic)
             engine = connect_to_db()
 
-            # Load data from session state
+            # Load or fetch updated data
+            risk_data_updated = st.session_state.get('risk_data_updated', fetch_all_from_risk_data(engine))
+
+            # Ensure that the data is loaded before proceeding
+            if risk_data_updated is None or risk_data_updated.empty:
+                st.error("No data available. Please check the data source.")
+            else:
+                # Function to calculate Adequacy KPI
+                def calculate_adequacy_kpi(df):
+                    total_risks = df.shape[0]
+                    adequate_treatments = df[df['Adequacy'] == 'Acceptable'].shape[0]
+                    adequacy_kpi = (adequate_treatments / total_risks) * 100 if total_risks > 0 else 0
+                    return adequacy_kpi
+
+                # Function to calculate Direction KPI
+                def calculate_direction_kpi(df):
+                    total_risks = df.shape[0]
+                    improving_risks = df[df['Direction'] == 'Stable'].shape[0]
+                    direction_kpi = (improving_risks / total_risks) * 100 if total_risks > 0 else 0
+                    return direction_kpi
+
+                # Calculate and display Adequacy KPI
+                st.subheader('Adequacy and Direction Measures')
+
+                adequacy_kpi_description = """
+                **Adequacy KPI (%):** 
+                This KPI measures the percentage of risks that have been addressed with treatment plans deemed 'Acceptable'.
+                """
+                st.markdown(adequacy_kpi_description)
+                adequacy_kpi = calculate_adequacy_kpi(risk_data_updated)
+                st.metric("Adequacy KPI (%)", f"{adequacy_kpi:.2f}%")
+
+                # Calculate and display Direction KPI
+                direction_kpi_description = """
+                **Direction KPI (%):** 
+                This KPI measures the percentage of risks that are, based on the current information residual risk is expected to be stable in the next twelve months , classified as 'Stable' in the 'Direction' field.
+                """
+                st.markdown(direction_kpi_description)
+                direction_kpi = calculate_direction_kpi(risk_data_updated)
+                st.metric("Direction KPI (%)", f"{direction_kpi:.2f}%")
+                            
+        elif tab == 'Reports':
+            st.subheader('Reports')
+            
+            engine = connect_to_db()
+
+            # Load or fetch data
             risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
             
-            # Tab for reports
-            if st.checkbox("Show Reports"):
-                st.header("Filters")
+            # Display Risk Treatment Progress Report
+            st.subheader("Risk Treatment Progress Report")
+            progress_report = generate_progress_reports(risk_data)
+            st.dataframe(progress_report)
 
-                # Filters
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    start_date = st.date_input("Start Date", value=None)
-                with col2:
-                    end_date = st.date_input("End Date", value=None)
-                with col3:
-                    risk_owners = st.selectbox("Risk Owners", options=['All'] + risk_data['risk_owners'].unique().tolist())
-                product_type = st.selectbox("Product Type", options=['All'] + risk_data['Product_Type'].unique().tolist())
-
-                # Apply filters to the risk_data
-                filtered_data = apply_filters(risk_data, start_date, end_date, risk_owners, product_type)
-
-                # Generate and display reports
-                create_report(filtered_data, 'risk_type', 'residual_risk_rating', 'Risk Type by Residual Risk Rating')
-                create_report(filtered_data, 'dosage_form_route', 'residual_risk_rating', 'Dosage Form Route by Residual Risk Rating')
-                create_report(filtered_data, 'Active_Ingredient', 'residual_risk_rating', 'Active Ingredient by Residual Risk Rating')
-                create_report(filtered_data, 'Manufacturer', 'residual_risk_rating', 'Manufacturer by Residual Risk Rating')
-                
-                st.title("Risk Data Trend Analysis")
-
-                # Load the risk_data from session state or fetch from the database
-                risk_data = st.session_state.get('risk_data', fetch_all_from_risk_data(engine))
-
-                # Convert date column to datetime format for proper analysis
-                risk_data['date_last_updated'] = pd.to_datetime(risk_data['date_last_updated'])
-
-                # Filters
-                start_date = st.date_input("Start Date", value=risk_data['date_last_updated'].min().date())
-                end_date = st.date_input("End Date", value=risk_data['date_last_updated'].max().date())
-                filtered_data = risk_data[(risk_data['date_last_updated'] >= pd.to_datetime(start_date)) &
-                                          (risk_data['date_last_updated'] <= pd.to_datetime(end_date))]
-
-                # Trend Analysis 1: Risk Occurrence Over Time by Risk Type
-                plot_trend(filtered_data, 'date_last_updated', 'risk_type', 'Trend of Risk Occurrence Over Time by Risk Type')
-
-                # Trend Analysis 2: Inherent Risk Rating Trends Over Time
-                plot_trend(filtered_data, 'date_last_updated', 'inherent_risk_rating', 'Trend of Inherent Risk Rating Over Time')
-
-                # Trend Analysis 3: Residual Risk Rating Trends Over Time
-                plot_trend(filtered_data, 'date_last_updated', 'residual_risk_rating', 'Trend of Residual Risk Rating Over Time')
-
-                # Trend Analysis 4: Product Type Risk Trends Over Time
-                plot_trend(filtered_data, 'date_last_updated', 'Product_Type', 'Trend of Risks by Product Type Over Time')   
-        
+            
+            generate_trend_analysis(risk_data)
+      
         elif tab == 'Delete Risk':
             st.subheader('Delete Risk from Risk Data')
             
@@ -2020,37 +2234,27 @@ def main():
                     st.write(f"**Risk Owner(s):** {selected_risk['risk_owners']}")
                 else:
                     st.write("Risk Owner(s) not available.")
-
-                if 'Product_Name' in selected_risk:
-                    st.write(f"**Product Name:** {selected_risk['Product_Name']}")
-                else:
-                    st.write("Product Name not available.")
-
-                if 'Active_Ingredient' in selected_risk:
-                    st.write(f"**Active Ingredient:** {selected_risk['Active_Ingredient']}")
-                else:
-                    st.write("Active Ingredient not available.")
-
-                if 'Strength' in selected_risk:
-                    st.write(f"**Strength:** {selected_risk['Strength']}")
-                else:
-                    st.write("Strength not available.")
-
-                if 'Lot_Number' in selected_risk:
-                    st.write(f"**Lot Number:** {selected_risk['Lot_Number']}")
-                else:
-                    st.write("Lot Number not available.")
-                    
-                if 'Manufacturer' in selected_risk:
-                    st.write(f"**Manufacturer:** {selected_risk['Manufacturer']}")
-                else:
-                    st.write("Manufacturer not available.")
                     
                 if 'Status' in selected_risk:
                     st.write(f"**Status:** {selected_risk['Status']}")
                 else:
                     st.write("Status not avaliable.")
-                 
+                    
+                if 'opportunity_type' in selected_risk:
+                    st.write(f"**Opportunity Type:** {selected_risk['opportunity_type']}")
+                else:
+                    st.write("Opportunity Type not available.")
+                    
+                if 'Adequacy' in selected_risk:
+                    st.write(f"**Adequacy of Risk Management Systems:** {selected_risk['Adequacy']}")
+                else:
+                    st.write("Adequacy of Risk Management Systems not available.")
+                    
+                if 'Direction' in selected_risk:
+                    st.write(f"**Direction of Residual Risk Rating:** {selected_risk['Direction']}")
+                else:
+                    st.write("Direction of Residual Risk Rating is not available.")
+                                 
                 if st.button('Delete Risk'):
                     initial_count = len(st.session_state['risk_data'])
                     delete_from_risk_data_by_risk_description(risk_to_delete_description)
@@ -2060,12 +2264,93 @@ def main():
             else:
                 st.write("No risks to delete.")
          
+        elif tab == 'Delete/Update User':
+            st.subheader('Delete and Update Users')
+            
+            # Assuming you have already established a database connection
+            engine = connect_to_db()
+
+            # Function to retrieve user information (username and role) from the credentials table
+            def get_user_info(username):
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT user, role FROM credentials WHERE user = :username"), {'username': username}).fetchone()
+                    if result:
+                        # Accessing by positional indices
+                        return result[0], result[1]
+                    return None, None
+
+            # Function to retrieve all usernames from the credentials table
+            def get_all_usernames():
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT user FROM credentials")).fetchall()
+                    return [row[0] for row in result]
+
+            # Function to retrieve distinct roles from the credentials table
+            def get_all_roles():
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT DISTINCT role FROM credentials")).fetchall()
+                    return [row[0] for row in result]
+
+            # Assuming the logged-in user is in session state
+            logged_in_user = st.session_state.user
+
+            # Retrieve the current user's name and role from the credentials table
+            current_user, current_role = get_user_info(logged_in_user)
+
+            # Fetch the list of all usernames and roles from the database
+            all_usernames = get_all_usernames()
+            all_roles = get_all_roles()
+
+            # Tab logic
+            tab = st.selectbox("Select Option", ["Delete User", "Update User"])
+
+            # Check if the current user is superadmin
+            if current_role == "superadmin":
+
+                # DELETE USER LOGIC
+                if tab == "Delete User":
+                    st.subheader("Delete User")
+                    delete_user = st.selectbox("Select username to delete", all_usernames)  # Dynamically populate the usernames
+                    if st.button("Delete"):
+                        try:
+                            with engine.connect() as conn:
+                                conn.execute(text(f"DELETE FROM credentials WHERE user = :user"), {'user': delete_user})
+                                st.success(f"User {delete_user} deleted successfully.")
+                        except Exception as e:
+                            st.error(f"Error deleting user: {e}")
+
+                # UPDATE USER LOGIC
+                elif tab == "Update User":
+                    st.subheader("Update User")
+
+                    # Select user to update
+                    update_user = st.selectbox("Select username to update", all_usernames)  # Dynamically populate the usernames
+
+                    # Fetch the current role of the selected user
+                    selected_user, selected_role = get_user_info(update_user)
+
+                    # Display the user's current role in the dropdown and allow it to be changed
+                    new_role = st.selectbox("Select new role", all_roles, index=all_roles.index(selected_role))  # Set default to current role
+
+                    # Select new expiry date
+                    new_expiry_date = st.date_input("Select new expiry date")
+
+                    if st.button("Update"):
+                        try:
+                            with engine.connect() as conn:
+                                conn.execute(text(f"UPDATE credentials SET role = :role, expiry_date = :expiry WHERE user = :user"), 
+                                             {'role': new_role, 'expiry': new_expiry_date, 'user': update_user})
+                                st.success(f"User {update_user} updated successfully.")
+                        except Exception as e:
+                            st.error(f"Error updating user: {e}")
+            else:
+                st.warning("You do not have permission to delete or update users.")
                              
         elif tab == 'Update Risk':
             st.subheader('Update Risk in Risk Data')
-                             
+            
             engine = connect_to_db()
-
+            
             # Fetch the current 'risk_type' from the selected row
             if not st.session_state['risk_data'].empty:
                 # Fetch the risk descriptions for selection
@@ -2077,116 +2362,87 @@ def main():
                 if not filtered_risk_data.empty:
                     # Select the row corresponding to the selected risk description
                     selected_risk_row = filtered_risk_data.iloc[0]
+                    
+                    # Define the list of risk types once
+                    risk_types = sorted([
+                        'Strategic Risk', 'Operational Risk', 'Compliance Risk', 'Reputational Risk', 'Financial Risk',
+                        'Regulatory Risk', 'Environmental Risk', 'Human Resource Risk',
+                        'Supply Chain Risk', 'Ethical Risk', 'Technological Risk', 'Public Health Risk'
+                    ])
 
                     # Allow user to change the 'risk_type' with the current value pre-selected
-                    st.session_state['risk_type'] = st.selectbox('Risk Type', sorted([
-                        'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
-                        'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
-                        'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
-                        'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
-                    ]), index=sorted([
-                        'Product Performance Risk', 'Adverse Event Risk', 'User-Related Risk', 
-                        'Manufacturing and Supply Chain Risk', 'Environmental Risk', 'Regulatory and Compliance Risk',
-                        'Patient-Related Risk', 'Clinical and Operational Risk', 'Economic and Financial Risk',
-                        'Public Perception and Social Risk', 'Cybersecurity Risk', 'End-of-Life Risk'
-                    ]).index(selected_risk_row['risk_type']))
+                    st.session_state['risk_type'] = st.selectbox('Risk Type', risk_types, 
+                        index=risk_types.index(selected_risk_row['risk_type']))
+                   
+                    # Display fields for updating the risk
+                    updated_risk_description = st.text_input('risk_description', value=selected_risk_row['risk_description'])
+                    updated_cause_consequences = st.text_input('cause_consequences', value=selected_risk_row['cause_consequences'])
+                    updated_risk_owners = st.text_input('risk_owners', value=selected_risk_row['risk_owners'])
+                    updated_inherent_risk_probability = st.selectbox('inherent_risk_probability', list(risk_levels.keys()), index=list(risk_levels.keys()).index(selected_risk_row['inherent_risk_probability']))
+                    updated_inherent_risk_impact = st.selectbox('inherent_risk_impact', list(risk_levels.keys()), index=list(risk_levels.keys()).index(selected_risk_row['inherent_risk_impact']))
+                    updated_controls = st.text_input('controls', value=selected_risk_row['controls'])
 
-                # Fetch the existing picklist options for dosage form and route
-                options = get_dosage_form_route_options()
+                    # New field for updating Adequacy
+                    updated_adequacy = st.selectbox('Adequacy', ['Weak', 'Acceptable', 'Strong'], index=['Weak', 'Acceptable', 'Strong'].index(selected_risk_row['Adequacy']))
 
-                # Retrieve the existing dosage_form_route_id from the selected risk
-                current_dosage_form_route_id = selected_risk_row['dosage_form_route_id']
-                current_dosage_form_route = next((opt[1] for opt in options if opt[0] == current_dosage_form_route_id), None)
+                    updated_control_owners = st.text_input('control_owners', value=selected_risk_row['control_owners'])
+                    updated_residual_risk_probability = st.selectbox('residual_risk_probability', list(risk_levels.keys()), index=list(risk_levels.keys()).index(selected_risk_row['residual_risk_probability']))
+                    updated_residual_risk_impact = st.selectbox('residual_risk_impact', list(risk_levels.keys()), index=list(risk_levels.keys()).index(selected_risk_row['residual_risk_impact']))
 
-                # Display fields for updating the risk
-                updated_risk_description = st.text_input('Risk Description', value=selected_risk_row['risk_description'])
-                updated_cause_consequences = st.text_input('Cause & Consequences', value=selected_risk_row['cause_consequences'])
-                updated_risk_owners = st.text_input('Risk Owner(s)', value=selected_risk_row['risk_owners'])
-                updated_inherent_risk_probability = st.selectbox('Inherent Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['inherent_risk_probability']))
-                updated_inherent_risk_impact = st.selectbox('Inherent Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['inherent_risk_impact']))
-                updated_controls = st.text_input('Control(s)', value=selected_risk_row['controls'])
-                updated_control_owners = st.text_input('Control Owner(s)', value=selected_risk_row['control_owners'])
-                updated_residual_risk_probability = st.selectbox('Residual Risk Probability', list(risk_probability.keys()), index=list(risk_probability.keys()).index(selected_risk_row['residual_risk_probability']))
-                updated_residual_risk_impact = st.selectbox('Residual Risk Impact', list(risk_impact.keys()), index=list(risk_impact.keys()).index(selected_risk_row['residual_risk_impact']))
-                updated_by = st.text_input('Updated By', value=selected_risk_row['updated_by'])
-                updated_date_last_updated = st.date_input('Date Last Updated', value=selected_risk_row['date_last_updated'])
+                    # New field for updating Direction
+                    updated_direction = st.selectbox('Direction', ['Increasing', 'Decreasing', 'Stable'], index=['Increasing', 'Decreasing', 'Stable'].index(selected_risk_row['Direction']))
 
-                # New field for updating Product Type
-                product_type_list = sorted(['Medical Device', 'Pharmaceutical', 'Other'])
+                    updated_by = st.text_input('updated_by', value=selected_risk_row['updated_by'])
+                    updated_date_last_updated = st.date_input('date_last_updated', value=selected_risk_row['date_last_updated'])
+                    
+                    # Define the list of units once
+                    units = sorted([
+                        'Licensing and Enforcement', 'Evaluations and Registration', 'Pharmacovigilance and Clinical Trials',
+                        'Chemistry Laboratory', 'Microbiology Laboratory', 'Medical Devices Laboratory', 'Quality Unit',
+                        'Legal Unit', 'Human Resources', 'Information and Communication Technology', 'Finance and Administration'
+                    ])
 
-                if selected_risk_row['Product_Type'] in product_type_list:
-                    product_type_index = product_type_list.index(selected_risk_row['Product_Type'])
-                else:
-                    product_type_index = 0  # Fallback to the first option or handle as needed
+                    # New field for updating unit
+                    updated_unit = st.selectbox('Unit', units, index=units.index(selected_risk_row['Unit']))
 
-                updated_product_type = st.selectbox('Product Type', product_type_list, index=product_type_index)
+                    # New field for updating Status
+                    updated_status = st.selectbox('Status', ['Open', 'Closed'], index=['Open', 'Closed'].index(selected_risk_row['Status']))
 
-                # New fields for updating Product_Name, Active_Ingredient, Strength, Lot_Number, and Expiry_Date
-                updated_product_name = st.text_input('Product Name', value=selected_risk_row['Product_Name'])
-                updated_active_ingredient = st.text_input('Active Ingredient', value=selected_risk_row['Active_Ingredient'])
-                updated_strength = st.text_input('Strength', value=selected_risk_row['Strength'])
-                updated_lot_number = st.text_input('Lot Number', value=selected_risk_row['Lot_Number'])
-                updated_expiry_date = st.date_input('Expiry Date', value=selected_risk_row['Expiry_Date'])
-                updated_manufacturer = st.text_input('Manufacturer', value=selected_risk_row['Manufacturer'])
+                    # New field for updating Opportunity Type
+                    updated_opportunity_type = st.selectbox('Is there an Opportunity associated with this risk?', ['No', 'Yes'], index=['No', 'Yes'].index(selected_risk_row.get('opportunity_type', 'No')))
 
-                # New field for updating Dosage Form and Route using the picklist
-                if current_dosage_form_route_id in [opt[0] for opt in options]:
-                    dosage_form_route_index = [opt[0] for opt in options].index(current_dosage_form_route_id)
-                else:
-                    dosage_form_route_index = 0  # Fallback to the first option or handle as needed
-
-                updated_dosage_form_route = st.selectbox(
-                    'Dosage Form and Route',
-                    options=[(opt[0], opt[1]) for opt in options],
-                    index=dosage_form_route_index,
-                    format_func=lambda x: x[1]
-                )
-
-                # New field for updating Status
-                updated_status = st.selectbox('Status', ['Open', 'Closed'], index=['Open', 'Closed'].index(selected_risk_row['Status']))
-
-                if st.button('Update Risk'):
-                    # Fetch the current risk data from the database based on risk_to_update identifier
-                    existing_risk = fetch_risk_by_description(risk_to_update)
-
-                    if existing_risk is not None:
+                    if st.button('Update Risk'):
                         updated_risk = {
-                            'risk_type': st.session_state['risk_type'],
-                            'updated_by': updated_by,
-                            'date_last_updated': updated_date_last_updated.strftime('%Y-%m-%d'),
-                            'risk_description': updated_risk_description,
-                            'cause_consequences': updated_cause_consequences,
-                            'risk_owners': updated_risk_owners,
-                            'inherent_risk_probability': updated_inherent_risk_probability,
-                            'inherent_risk_impact': updated_inherent_risk_impact,
-                            'inherent_risk_rating': calculate_risk_rating(updated_inherent_risk_probability, updated_inherent_risk_impact),
-                            'controls': updated_controls,
-                            'control_owners': updated_control_owners,
-                            'residual_risk_probability': updated_residual_risk_probability,
-                            'residual_risk_impact': updated_residual_risk_impact,
-                            'residual_risk_rating': calculate_risk_rating(updated_residual_risk_probability, updated_residual_risk_impact),
-                            'Product_Type': updated_product_type,  # Include the updated product type in the risk update
-                            'dosage_form_route_id': updated_dosage_form_route[0],  # Include the updated dosage form and route ID
-                            'Product_Name': updated_product_name,  # Include the updated product name
-                            'Active_Ingredient': updated_active_ingredient,  # Include the updated active ingredient
-                            'Strength': updated_strength,  # Include the updated strength
-                            'Lot_Number': updated_lot_number,  # Include the updated lot number
-                            'Expiry_Date': updated_expiry_date.strftime('%Y-%m-%d'),  # Include the updated expiry date
-                            'Manufacturer': updated_manufacturer,  # Include the updated manufacturer
-                            'Status': updated_status  # Include the updated status
-                        }
-
-                        # Attempt to update the risk
-                        update_success = update_risk_data_by_risk_description(risk_to_update, updated_risk)
+                        'risk_type': st.session_state['risk_type'],
+                        'updated_by': updated_by,
+                        'date_last_updated': updated_date_last_updated.strftime('%Y-%m-%d'),
+                        'risk_description': updated_risk_description,
+                        'cause_consequences': updated_cause_consequences,
+                        'risk_owners': updated_risk_owners,
+                        'inherent_risk_probability': updated_inherent_risk_probability,
+                        'inherent_risk_impact': updated_inherent_risk_impact,
+                        'inherent_risk_rating': calculate_risk_rating(updated_inherent_risk_probability, updated_inherent_risk_impact),
+                        'controls': updated_controls,
+                        'Adequacy': updated_adequacy,  # Capitalize key to match database field
+                        'control_owners': updated_control_owners,
+                        'residual_risk_probability': updated_residual_risk_probability,
+                        'residual_risk_impact': updated_residual_risk_impact,
+                        'residual_risk_rating': calculate_risk_rating(updated_residual_risk_probability, updated_residual_risk_impact),
+                        'Direction': updated_direction,  # Capitalize key to match database field
+                        'Unit': updated_unit,
+                        'Status': updated_status,
+                        'opportunity_type': updated_opportunity_type
+                    }
+                        old_data = st.session_state['risk_data'].copy()
+                        update_risk_data_by_risk_description(risk_to_update, updated_risk)
                         st.session_state['risk_data'] = fetch_all_from_risk_data(engine)
-
-                        if update_success:
-                            st.success("Risk updated successfully.")
-                        else:
-                            st.error("Failed to update the risk.")
-                    else:
-                        st.warning("No matching risk found to update.")
-
+                        if not old_data.equals(st.session_state['risk_data']):
+                            st.write("Risk updated.")
+                else:
+                    st.write("No matching risk found to update.")
+            else:
+                st.write("No risks to update.")
+                
 if __name__ == '__main__':
     main()
         
